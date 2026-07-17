@@ -31,6 +31,15 @@ and an optional play timer.
   unlock.
 - Survives reboots; a powered-off-mid-game session resumes on next boot.
 
+## Screenshots
+
+| ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
+| :--: | :--: | :--: |
+| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list; add play time with **◀ ▶** and a live preview, or turn the timer off* | *The PIN gate — set once when arming; **A** confirms* |
+
+*(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
+your device uses.)*
+
 ## Requirements
 
 - Miyoo Mini or Mini+ running **Onion OS 4.3 or newer**.
