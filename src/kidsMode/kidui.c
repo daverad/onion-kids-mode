@@ -62,13 +62,19 @@
 #include "components/list.h"
 #include "system/battery.h"
 #include "system/keymap_sw.h"
+#include "system/volume.h" // setVolume (0-20); MAX_VOLUME
 #include "theme/background.h"
 #include "theme/theme.h"
+#include "utils/flags.h"    // temp_flag_set (signals keymon to reload)
+#include "utils/json.h"
 #include "utils/keystate.h"
 #include "utils/log.h"
 #include "utils/msleep.h"
 #include "utils/sdl_init.h"
 #include "utils/str.h"
+
+// system/volume.h defines MAX_VOLUME (20).
+#define SYSTEM_JSON "/mnt/SDCARD/system.json"
 
 #define MAX_GAMES 100
 #define PIN_LEN 4
@@ -91,9 +97,14 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_UNLOCK 0
 #define MENU_ADDTIME 1
 #define MENU_NOTIMER 2
-#define MENU_BACK 3
+#define MENU_VOLUME 3
+#define MENU_CHANGEPIN 4
+#define MENU_BACK 5
+#define MENU_ROWS 6
 #define TIMER_STEP 5
 #define TIMER_MAX 120
+// The volume ceiling is picked in 10% steps; 0% = muted.
+#define LEVEL_STEP 10
 
 // Big kid-facing text sizes (the theme's own sizes are used for header,
 // list rows and hints via resource_getFont)
@@ -259,6 +270,55 @@ static void sigHandler(int sig)
         break;
     default:
         break;
+    }
+}
+
+// ----------------------------- volume cap ----------------------------------
+// The parent can cap the kid's max volume. Enforcement is a soft cap:
+// whenever the live value (system.json, kept current by keymon) sits above
+// the ceiling, we lower it back down and signal keymon to reload. keymon
+// owns the physical +/- buttons, so a kid can nudge past the cap briefly;
+// kid_mode_loop.sh's ticker calls the clamp below every ~10s.
+
+static int readSystemInt(const char *key, int fallback)
+{
+    cJSON *root = json_load(SYSTEM_JSON);
+    int value = fallback;
+    if (root != NULL) {
+        json_getInt(root, key, &value);
+        cJSON_Delete(root);
+    }
+    return value;
+}
+
+// Update a single numeric property in system.json and poke keymon to reload
+// (same mechanism as Onion's settings_saveSystemProperty).
+static void writeSystemInt(const char *key, int value)
+{
+    cJSON *root = json_load(SYSTEM_JSON);
+    if (root == NULL)
+        return;
+    cJSON *prop = cJSON_GetObjectItem(root, key);
+    if (prop != NULL)
+        cJSON_SetNumberValue(prop, value);
+    else
+        cJSON_AddNumberToObject(root, key, value);
+    json_save(root, SYSTEM_JSON);
+    cJSON_Delete(root);
+    temp_flag_set("settings_changed", true);
+}
+
+// Lower the live volume to the ceiling if it's above it. cap_pct 0..100.
+static void clampVolume(int cap_pct)
+{
+    if (cap_pct < 0)
+        cap_pct = 0;
+    if (cap_pct >= 100)
+        return; // 100% = no cap
+    int cap_raw = cap_pct * MAX_VOLUME / 100;
+    if (readSystemInt("vol", cap_raw) > cap_raw) {
+        setVolume(cap_raw);
+        writeSystemInt("vol", cap_raw);
     }
 }
 
@@ -530,44 +590,52 @@ static void formatAddMinutes(void *self, char *out_label)
     sprintf(out_label, "+%d min", item->value * TIMER_STEP);
 }
 
+static void formatVolume(void *self, char *out_label)
+{
+    ListItem *item = (ListItem *)self;
+    if (item->value == 0)
+        strcpy(out_label, "Mute");
+    else if (item->value * LEVEL_STEP >= 100)
+        strcpy(out_label, "100% (off)");
+    else
+        sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
+}
+
 // The parent menu is a real Onion list: full-width rows, the theme's list
 // font and selection background, and an Apps-menu-style value selector on
 // the "Add play time" row.
 static void renderMenu(List *list, int remaining)
 {
     renderBase();
-    theme_renderHeader(screen, "Kids Mode - Parent Menu", false);
+    theme_renderHeader(screen, "Parent Menu", false);
     theme_renderHeaderBattery(screen, batteryPercentage());
     theme_renderList(screen, list);
 
-    // Status line: current remaining time, and — while the add-time row is
-    // selected — what it becomes when applied. Same font as the menu rows,
-    // tucked bottom-right above the footer.
-    char info[STR_MAX] = "";
+    // With a full-height list there's no room for a status line above the
+    // footer, so the time-left status (and the add-time preview Dave asked
+    // for) lives as a compact chip on the empty left side of the header bar.
+    // The title is centered and starts well to the right, so a short left
+    // chip never overlaps it.
+    char chip[64] = "";
     int rem_min = remaining >= 0 ? (remaining + 59) / 60 : -1;
-    if (list->active_pos == MENU_ADDTIME) {
-        int add_min = list->items[MENU_ADDTIME].value * TIMER_STEP;
-        if (rem_min >= 0)
-            snprintf(info, sizeof(info),
-                     "Time left: %d min (%d min after adding)", rem_min,
+    int add_min = list->items[MENU_ADDTIME].value * TIMER_STEP;
+    if (rem_min >= 0) {
+        if (list->active_pos == MENU_ADDTIME)
+            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 %d min", rem_min,
                      rem_min + add_min);
+        else if (list->active_pos == MENU_NOTIMER)
+            snprintf(chip, sizeof(chip), "%d min \xE2\x86\x92 off", rem_min);
         else
-            snprintf(info, sizeof(info), "No timer (%d min after adding)",
-                     add_min);
+            snprintf(chip, sizeof(chip), "%d min left", rem_min);
     }
-    else if (list->active_pos == MENU_NOTIMER && rem_min >= 0) {
-        snprintf(info, sizeof(info), "Time left: %d min (no limit after)",
-                 rem_min);
+    else if (list->active_pos == MENU_ADDTIME) {
+        snprintf(chip, sizeof(chip), "+%d min", add_min);
     }
     else {
-        if (rem_min >= 0)
-            snprintf(info, sizeof(info), "Time left: %d min", rem_min);
-        else
-            snprintf(info, sizeof(info), "No timer set");
+        strcpy(chip, "No timer");
     }
-    drawTextAlign(info, (int)(620.0 * g_scale), (int)(395.0 * g_scale),
-                  resource_getFont(LIST), theme()->list.color,
-                  g_display.width - 40, TEXT_RIGHT);
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale), font_info,
+                  theme()->hint.color, (int)(150.0 * g_scale), TEXT_LEFT);
 
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "OK", "BACK");
@@ -703,6 +771,8 @@ int main(int argc, char *argv[])
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
+    int menu_maxvol = 100; // volume ceiling shown in the menu (%)
+    int clamp_volume = -1; // headless: lower volume to this ceiling and exit
     char pin_title[STR_MAX] = "";
 
     for (int i = 1; i < argc; i++) {
@@ -722,10 +792,21 @@ int main(int argc, char *argv[])
             menu_timer_minutes = atoi(argv[++i]);
         else if (strcmp(argv[i], "--remaining") == 0 && i + 1 < argc)
             menu_remaining = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--maxvol") == 0 && i + 1 < argc)
+            menu_maxvol = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--clamp-volume") == 0 && i + 1 < argc)
+            clamp_volume = atoi(argv[++i]);
         else if ((strcmp(argv[i], "-t") == 0 ||
                   strcmp(argv[i], "--title") == 0) &&
                  i + 1 < argc)
             strncpy(pin_title, argv[++i], STR_MAX - 1);
+    }
+
+    // Headless enforcement modes: no UI, just clamp the live level and exit.
+    // Called on commit and by kid_mode_loop.sh's ticker every ~10s.
+    if (clamp_volume >= 0) {
+        clampVolume(clamp_volume);
+        return 0;
     }
 
     if (menu_timer_minutes < 0)
@@ -756,8 +837,15 @@ int main(int argc, char *argv[])
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
 
-    // Parent menu list (native Onion list component)
-    List menu_list = list_create(4, LIST_SMALL);
+    // Clamp the ceiling passed in to whole 10% steps within range
+    if (menu_maxvol < 0)
+        menu_maxvol = 0;
+    if (menu_maxvol > 100)
+        menu_maxvol = 100;
+
+    // Parent menu list (native Onion list component). Order must match the
+    // MENU_* indices.
+    List menu_list = list_create(MENU_ROWS, LIST_SMALL);
     list_addItem(&menu_list,
                  (ListItem){.label = "Exit Kids Mode", .item_type = ACTION});
     list_addItem(&menu_list, (ListItem){.label = "Add play time",
@@ -770,6 +858,14 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list, (ListItem){.label = "Turn off timer",
                                         .item_type = ACTION,
                                         .disabled = menu_remaining < 0});
+    list_addItem(&menu_list, (ListItem){.label = "Max volume",
+                                        .item_type = MULTIVALUE,
+                                        .value_min = 0,
+                                        .value_max = 100 / LEVEL_STEP,
+                                        .value = menu_maxvol / LEVEL_STEP,
+                                        .value_formatter = formatVolume});
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Change PIN", .item_type = ACTION});
     list_addItem(&menu_list,
                  (ListItem){.label = "Back", .item_type = ACTION});
 
@@ -945,6 +1041,20 @@ int main(int argc, char *argv[])
                     }
                     else if (menu_list.active_pos == MENU_NOTIMER) {
                         writeResult("MENU", "NOTIMER", NULL);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_VOLUME) {
+                        char pct[16];
+                        snprintf(pct, sizeof(pct), "%d",
+                                 menu_list.items[MENU_VOLUME].value *
+                                     LEVEL_STEP);
+                        writeResult("MENU", "VOLUME", pct);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_CHANGEPIN) {
+                        writeResult("MENU", "CHANGEPIN", NULL);
                         exit_code = 5;
                         quit = true;
                     }

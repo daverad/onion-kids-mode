@@ -379,6 +379,29 @@ get_timer_minutes() {
 # src/kidsMode/kidui.c
 timer_max=120
 
+# ------------------------------ volume cap ---------------------------------
+# Optional ceiling (percent, 10% steps) the kid can't exceed. kidui does the
+# actual clamping (it can call setVolume and poke keymon); the shell just
+# stores the ceiling and asks kidui to enforce it on change and on every
+# ticker tick. Absent / 100 = no cap.
+
+get_max_volume_pct() {
+    v="$(config_get max_volume_pct)"
+    case "$v" in
+        '' | *[!0-9]*) echo 100 ;;
+        *) [ "$v" -gt 100 ] && echo 100 || echo "$v" ;;
+    esac
+}
+
+# Enforce the ceiling now (a no-op when set to 100% / no cap, and when the
+# live level is already at or below the ceiling).
+enforce_caps() {
+    [ -x "$kidui_bin" ] || return 0
+    vcap="$(get_max_volume_pct)"
+    [ "$vcap" -lt 100 ] && "$kidui_bin" --clamp-volume "$vcap" > /dev/null 2>&1
+    return 0
+}
+
 state_day() { sed -n 1p "$timer_state" 2> /dev/null; }
 state_used() {
     v="$(sed -n 2p "$timer_state" 2> /dev/null)"
@@ -485,6 +508,10 @@ ticker_loop() {
         sleep 10
         [ -f "$flagfile" ] || break
         [ -f /tmp/shutting_down ] && break
+
+        # Re-assert the volume ceiling if the kid nudged past it with the
+        # physical buttons (keymon owns those live).
+        enforce_caps
 
         budget=$(($(get_timer_minutes) * 60 + $(state_bonus)))
         if [ "$budget" -le 0 ]; then
@@ -821,17 +848,36 @@ pick_session_timer() {
     update_remaining_now
 }
 
+# -------------------------------- change PIN -------------------------------
+# Set a new PIN from inside the parent menu (the parent already unlocked, so
+# no need to re-verify the old one). A mismatch retries in place; B cancels.
+
+change_pin() {
+    cp_notice=""
+    while :; do
+        cp1="$(run_pin_entry "Set new PIN" "$cp_notice")" || return 1
+        cp2="$(run_pin_entry "Confirm new PIN")" || return 1
+        if [ "$cp1" = "$cp2" ]; then
+            store_pin "$cp1"
+            infoPanel -t "Kids Mode" -m "PIN updated." --auto
+            return 0
+        fi
+        cp_notice="PINs did not match - try again"
+    done
+}
+
 # ------------------------------ parent menu --------------------------------
-# Shown after a correct PIN: exit Kids Mode or add play time. "Add play
-# time" is an inline value selector on the menu row itself (LEFT/RIGHT to
-# pick 5-50 min, A/START to apply) — kidui reports the chosen minutes on
-# line 3 of the result. Returns 0 = unlock requested, 1 = stay in Kid Mode.
+# Shown after a correct PIN: exit Kids Mode, add/turn off play time, set the
+# max volume ceiling, or change the PIN. Value rows report the
+# chosen value on line 3 of the result. Returns 0 = unlock requested,
+# 1 = stay in Kid Mode.
 
 parent_menu() {
     while :; do
         rm -f "$uiresult"
         "$kidui_bin" --parent-menu \
-            --remaining "$(timer_remaining)" > "$uilog" 2>&1
+            --remaining "$(timer_remaining)" \
+            --maxvol "$(get_max_volume_pct)" > "$uilog" 2>&1
         menu_rc=$?
 
         if [ "$menu_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "MENU" ]; then
@@ -856,6 +902,24 @@ parent_menu() {
                 update_remaining_now
                 log "Play timer turned off from the parent menu."
                 return 1
+                ;;
+            VOLUME)
+                # Store the new volume ceiling and enforce it now. Stay in
+                # the menu so the parent can tweak more settings.
+                case "$menu_arg" in
+                    '' | *[!0-9]*) ;;
+                    *)
+                        [ "$menu_arg" -gt 100 ] && menu_arg=100
+                        config_merge --argjson v "$menu_arg" '.max_volume_pct = $v'
+                        [ "$menu_arg" -lt 100 ] &&
+                            "$kidui_bin" --clamp-volume "$menu_arg" > /dev/null 2>&1
+                        log "Max volume set to ${menu_arg}%."
+                        ;;
+                esac
+                ;;
+            CHANGEPIN)
+                change_pin
+                # Stay in the menu regardless of outcome
                 ;;
             ADDTIME)
                 case "$menu_arg" in
@@ -925,6 +989,10 @@ cmd_run() {
     if has_pin && [ ! -f "$pin_backup" ]; then
         backup_pin
     fi
+
+    # Apply any stored volume ceiling right away (the ticker keeps
+    # re-asserting it thereafter)
+    enforce_caps
 
     start_ticker
 
