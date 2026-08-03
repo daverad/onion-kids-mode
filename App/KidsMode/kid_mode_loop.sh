@@ -343,11 +343,11 @@ get_timer_minutes() {
     esac
 }
 
-# ------------------------- volume / brightness caps ------------------------
-# Optional ceilings (percent, 10% steps) the kid can't exceed. kidui does the
-# actual clamping (it can call setVolume / display_setBrightness and poke
-# keymon); the shell just stores the ceiling and asks kidui to enforce it on
-# change and on every ticker tick. Absent / 100 = no cap.
+# ------------------------------ volume cap ---------------------------------
+# Optional ceiling (percent, 10% steps) the kid can't exceed. kidui does the
+# actual clamping (it can call setVolume and poke keymon); the shell just
+# stores the ceiling and asks kidui to enforce it on change and on every
+# ticker tick. Absent / 100 = no cap.
 
 get_max_volume_pct() {
     v="$(config_get max_volume_pct)"
@@ -357,26 +357,12 @@ get_max_volume_pct() {
     esac
 }
 
-get_max_brightness_pct() {
-    v="$(config_get max_brightness_pct)"
-    case "$v" in
-        '' | *[!0-9]*) echo 100 ;;
-        *)
-            [ "$v" -gt 100 ] && v=100
-            [ "$v" -lt 10 ] && v=10 # never let the screen go fully dark
-            echo "$v"
-            ;;
-    esac
-}
-
-# Enforce the ceilings now (no-ops when set to 100% / no cap, and when the
+# Enforce the ceiling now (a no-op when set to 100% / no cap, and when the
 # live level is already at or below the ceiling).
 enforce_caps() {
     [ -x "$kidui_bin" ] || return 0
     vcap="$(get_max_volume_pct)"
     [ "$vcap" -lt 100 ] && "$kidui_bin" --clamp-volume "$vcap" > /dev/null 2>&1
-    bcap="$(get_max_brightness_pct)"
-    [ "$bcap" -lt 100 ] && "$kidui_bin" --clamp-brightness "$bcap" > /dev/null 2>&1
     return 0
 }
 
@@ -487,8 +473,8 @@ ticker_loop() {
         [ -f "$flagfile" ] || break
         [ -f /tmp/shutting_down ] && break
 
-        # Re-assert the volume/brightness ceilings if the kid nudged past
-        # them with the physical buttons (keymon owns those live).
+        # Re-assert the volume ceiling if the kid nudged past it with the
+        # physical buttons (keymon owns those live).
         enforce_caps
 
         budget=$(($(get_timer_minutes) * 60 + $(state_bonus)))
@@ -846,7 +832,7 @@ change_pin() {
 
 # ------------------------------ parent menu --------------------------------
 # Shown after a correct PIN: exit Kids Mode, add/turn off play time, set the
-# max volume/brightness ceilings, or change the PIN. Value rows report the
+# max volume ceiling, or change the PIN. Value rows report the
 # chosen value on line 3 of the result. Returns 0 = unlock requested,
 # 1 = stay in Kid Mode.
 
@@ -855,8 +841,7 @@ parent_menu() {
         rm -f "$uiresult"
         "$kidui_bin" --parent-menu \
             --remaining "$(timer_remaining)" \
-            --maxvol "$(get_max_volume_pct)" \
-            --maxbright "$(get_max_brightness_pct)" > "$uilog" 2>&1
+            --maxvol "$(get_max_volume_pct)" > "$uilog" 2>&1
         menu_rc=$?
 
         if [ "$menu_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "MENU" ]; then
@@ -893,19 +878,6 @@ parent_menu() {
                         [ "$menu_arg" -lt 100 ] &&
                             "$kidui_bin" --clamp-volume "$menu_arg" > /dev/null 2>&1
                         log "Max volume set to ${menu_arg}%."
-                        ;;
-                esac
-                ;;
-            BRIGHTNESS)
-                case "$menu_arg" in
-                    '' | *[!0-9]*) ;;
-                    *)
-                        [ "$menu_arg" -gt 100 ] && menu_arg=100
-                        [ "$menu_arg" -lt 10 ] && menu_arg=10
-                        config_merge --argjson v "$menu_arg" '.max_brightness_pct = $v'
-                        [ "$menu_arg" -lt 100 ] &&
-                            "$kidui_bin" --clamp-brightness "$menu_arg" > /dev/null 2>&1
-                        log "Max brightness set to ${menu_arg}%."
                         ;;
                 esac
                 ;;
@@ -982,8 +954,8 @@ cmd_run() {
         backup_pin
     fi
 
-    # Apply any stored volume/brightness ceilings right away (the ticker
-    # keeps re-asserting them thereafter)
+    # Apply any stored volume ceiling right away (the ticker keeps
+    # re-asserting it thereafter)
     enforce_caps
 
     start_ticker
