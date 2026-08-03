@@ -1,12 +1,10 @@
-Straight from the r/MiyooMini thread: a longer play timer you can set
-yourself, and RetroArch's in-game shortcuts really are off while armed.
+Straight from the r/MiyooMini thread: longer play sessions, and RetroArch's
+in-game shortcuts really are off while armed.
 
 ## What's new
 
-- **Longer play sessions**: the timer now goes up to **60 minutes** by
-  default, and the ceiling is yours to set — `"timer_max_minutes"` in
-  `App/KidsMode/kidmode.json` takes any 5-minute step up to 240. It applies
-  to both the arm screen and *Add play time* in the parent menu.
+- **Longer play sessions**: the timer now goes up to **120 minutes**, up
+  from 50 — on the arm screen and on *Add play time* in the parent menu.
 - **RetroArch shortcuts locked while armed**: kiosk mode only ever hid the
   settings — the menu combo (MENU+SELECT) still opened the RetroArch menu.
   Now the menu combo, save/load state, state slots, rewind, fast-forward,
@@ -14,7 +12,8 @@ yourself, and RetroArch's in-game shortcuts really are off while armed.
   Kids Mode is armed, and restored from the backup on unlock. Prefer stock
   RetroArch shortcuts? Set `"lock_retroarch_hotkeys": false`.
 - **README**: a Settings table for `kidmode.json`, plus an FAQ (including
-  netplay — it needs the RetroArch menu, so it doesn't work while armed).
+  netplay — it's driven from the RetroArch menu, which Kids Mode now
+  blocks, so it isn't available while armed).
 
 ## Still in
 

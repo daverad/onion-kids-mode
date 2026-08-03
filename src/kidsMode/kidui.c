@@ -36,16 +36,11 @@
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
-//                                  picks the minutes, A/START applies, and
-//                                  the info line previews the new remaining
-//                                  time.
+//                                  picks 5-120 min, A/START applies, and the
+//                                  info line previews the new remaining time.
 //   kidui --pick-timer [--no-off] -t "..."
 //                                  minutes picker; with --no-off B cancels
 //                                  (exit 1) instead of choosing 0
-//   --max N                        highest pickable value in minutes for
-//                                  both selectors (default 60, rounded down
-//                                  to a 5-minute step, hard cap 240); set
-//                                  from "timer_max_minutes" in kidmode.json
 //
 // Play timer: kid_mode_loop.sh's ticker writes the remaining seconds to
 // /tmp/kidmode_remaining. The carousel shows it as a small chip and flips
@@ -98,11 +93,7 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_NOTIMER 2
 #define MENU_BACK 3
 #define TIMER_STEP 5
-// Highest pickable play time. The default matches kid_mode_loop.sh's own
-// default; parents can raise it with "timer_max_minutes" in kidmode.json,
-// which reaches us as --max (rounded to a step, never above TIMER_MAX_CAP).
-#define TIMER_MAX_DEFAULT 60
-#define TIMER_MAX_CAP 240
+#define TIMER_MAX 120
 
 // Big kid-facing text sizes (the theme's own sizes are used for header,
 // list rows and hints via resource_getFont)
@@ -712,7 +703,6 @@ int main(int argc, char *argv[])
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
-    int timer_max = TIMER_MAX_DEFAULT;
     char pin_title[STR_MAX] = "";
 
     for (int i = 1; i < argc; i++) {
@@ -732,26 +722,16 @@ int main(int argc, char *argv[])
             menu_timer_minutes = atoi(argv[++i]);
         else if (strcmp(argv[i], "--remaining") == 0 && i + 1 < argc)
             menu_remaining = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--max") == 0 && i + 1 < argc)
-            timer_max = atoi(argv[++i]);
         else if ((strcmp(argv[i], "-t") == 0 ||
                   strcmp(argv[i], "--title") == 0) &&
                  i + 1 < argc)
             strncpy(pin_title, argv[++i], STR_MAX - 1);
     }
 
-    // Keep the ceiling on a whole step and inside sane bounds, whatever
-    // kidmode.json says
-    if (timer_max > TIMER_MAX_CAP)
-        timer_max = TIMER_MAX_CAP;
-    timer_max = timer_max / TIMER_STEP * TIMER_STEP;
-    if (timer_max < TIMER_STEP)
-        timer_max = TIMER_STEP;
-
     if (menu_timer_minutes < 0)
         menu_timer_minutes = 0;
-    if (menu_timer_minutes > timer_max)
-        menu_timer_minutes = timer_max;
+    if (menu_timer_minutes > TIMER_MAX)
+        menu_timer_minutes = TIMER_MAX;
 
     signal(SIGINT, sigHandler);
     signal(SIGTERM, sigHandler);
@@ -783,7 +763,7 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list, (ListItem){.label = "Add play time",
                                         .item_type = MULTIVALUE,
                                         .value_min = 1,
-                                        .value_max = timer_max / TIMER_STEP,
+                                        .value_max = TIMER_MAX / TIMER_STEP,
                                         .value = 1,
                                         .value_formatter = formatAddMinutes});
     // Faded and skipped while no timer is running — nothing to turn off
@@ -890,8 +870,8 @@ int main(int argc, char *argv[])
                 case SW_BTN_RIGHT:
                 case SW_BTN_UP:
                     menu_timer_minutes += TIMER_STEP;
-                    if (menu_timer_minutes > timer_max)
-                        menu_timer_minutes = timer_max;
+                    if (menu_timer_minutes > TIMER_MAX)
+                        menu_timer_minutes = TIMER_MAX;
                     dirty = true;
                     break;
                 case SW_BTN_LEFT:

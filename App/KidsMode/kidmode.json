@@ -2,6 +2,5 @@
     "pin_hash": "",
     "pin_salt": "",
     "pin_plain": "",
-    "timer_max_minutes": 60,
     "lock_retroarch_hotkeys": true
 }

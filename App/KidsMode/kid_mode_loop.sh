@@ -375,22 +375,9 @@ get_timer_minutes() {
     esac
 }
 
-# Highest value the pickers offer, in minutes. Default 60; raise or lower it
-# with "timer_max_minutes" in kidmode.json (kept on a 5-minute step, capped
-# at 240 so the selector can't turn into an endless scroll).
-timer_max_default=60
-timer_max_cap=240
-
-get_timer_max() {
-    tx="$(config_get timer_max_minutes)"
-    case "$tx" in
-        '' | *[!0-9]*) tx=$timer_max_default ;;
-    esac
-    [ "$tx" -gt "$timer_max_cap" ] && tx=$timer_max_cap
-    tx=$((tx / 5 * 5))
-    [ "$tx" -lt 5 ] && tx=5
-    echo "$tx"
-}
+# Highest value the pickers offer, in minutes; must match TIMER_MAX in
+# src/kidsMode/kidui.c
+timer_max=120
 
 state_day() { sed -n 1p "$timer_state" 2> /dev/null; }
 state_used() {
@@ -816,8 +803,7 @@ ensure_fav_shortcut() {
 
 pick_session_timer() {
     rm -f "$uiresult"
-    timer_max="$(get_timer_max)"
-    "$kidui_bin" --pick-timer --max "$timer_max" > "$uilog" 2>&1
+    "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
 
     picked=0
@@ -842,10 +828,9 @@ pick_session_timer() {
 # line 3 of the result. Returns 0 = unlock requested, 1 = stay in Kid Mode.
 
 parent_menu() {
-    timer_max="$(get_timer_max)"
     while :; do
         rm -f "$uiresult"
-        "$kidui_bin" --parent-menu --max "$timer_max" \
+        "$kidui_bin" --parent-menu \
             --remaining "$(timer_remaining)" > "$uilog" 2>&1
         menu_rc=$?
 
@@ -878,8 +863,7 @@ parent_menu() {
                         # Older kidui without the inline selector: fall back
                         # to the separate picker screen; B cancels
                         rm -f "$uiresult"
-                        "$kidui_bin" --pick-timer --no-off --max "$timer_max" \
-                            -t "Add play time" > "$uilog" 2>&1
+                        "$kidui_bin" --pick-timer --no-off -t "Add play time" > "$uilog" 2>&1
                         if [ $? -eq 5 ] && [ "$(sed -n 1p "$uiresult")" = "TIMER" ]; then
                             menu_arg="$(sed -n 2p "$uiresult")"
                         else
