@@ -22,8 +22,9 @@ and an optional play timer.
 - **Parent menu** (hold **SELECT+START 3 s** → PIN): exit Kids Mode, add
   play time right on the menu row — **◀ ▶** picks +5…+50 min, **A**/**START**
   applies, and the header previews the remaining time before and after —
-  **turn the timer off entirely**, cap the **max volume** (Mute–100%) the
-  kid can reach, or **change the PIN** — all without leaving the launcher.
+  **turn the timer off entirely**, cap the **max volume** (Mute–100%) and
+  **max brightness** (10–100%) the kid can reach, or **change the PIN** —
+  all without leaving the launcher.
 - **Start over**: **X** on a game asks "Start over?" and launches from the
   beginning without touching in-game saves.
 - **MENU button in-game saves and exits** back to the carousel.
@@ -36,7 +37,7 @@ and an optional play timer.
 
 | ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
 | :--: | :--: | :--: |
-| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list (shot before the volume/PIN rows landed; due a re-shoot)* | *The PIN gate — set once when arming; **A** confirms* |
+| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list: add/turn off play time, cap max volume & brightness, or change the PIN* | *The PIN gate — set once when arming; **A** confirms* |
 
 *(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
 your device uses.)*
@@ -77,17 +78,17 @@ welcome.
 
 4. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
    *Exit Kids Mode / Add play time / Turn off timer / Max volume /
-   Change PIN / Back*.
+   Max brightness / Change PIN / Back*.
    - **Add play time:** **◀ ▶** picks the amount (the header shows what the
      remaining time becomes), **A**/**START** applies — you drop straight
      back into the kid launcher.
    - **Turn off timer:** removes any running timer (unlimited play until you
      re-arm or add time again).
-   - **Max volume:** **◀ ▶** sets the ceiling in 10% steps, down to Mute.
-     The kid can't go above it. *Soft cap:* the physical volume buttons are
-     handled by Onion's `keymon`, so a kid can briefly nudge past the
-     ceiling — Kids Mode pulls it back within ~10 seconds. Set to **100%**
-     to remove the cap.
+   - **Max volume / Max brightness:** **◀ ▶** sets the ceiling in 10% steps
+     (volume down to Mute; brightness down to 10%). The kid can't go above
+     it. *Soft cap:* the physical volume/brightness buttons are handled by
+     Onion's `keymon`, so a kid can briefly nudge past the ceiling — Kids
+     Mode pulls it back within ~10 seconds. Set to **100%** to remove a cap.
    - **Change PIN:** set a new 4-digit PIN on the spot (no computer needed).
 5. **Time's up:** the kid sees a friendly "Time's up!" screen. If the
    device is left on there, it powers off by itself after 5 minutes.

@@ -70,10 +70,11 @@
 #include "utils/keystate.h"
 #include "utils/log.h"
 #include "utils/msleep.h"
-#include "utils/sdl_init.h"
+#include "utils/sdl_init.h" // pulls in system/display.h: display_setBrightness
 #include "utils/str.h"
 
-// system/volume.h defines MAX_VOLUME (20).
+// system/display.h (via sdl_init.h) defines MAX_BRIGHTNESS and
+// display_setBrightness(0-10); system/volume.h defines MAX_VOLUME (20).
 #define SYSTEM_JSON "/mnt/SDCARD/system.json"
 
 #define MAX_GAMES 100
@@ -98,13 +99,16 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_ADDTIME 1
 #define MENU_NOTIMER 2
 #define MENU_VOLUME 3
-#define MENU_CHANGEPIN 4
-#define MENU_BACK 5
-#define MENU_ROWS 6
+#define MENU_BRIGHTNESS 4
+#define MENU_CHANGEPIN 5
+#define MENU_BACK 6
+#define MENU_ROWS 7
 #define TIMER_STEP 5
 #define TIMER_MAX 50
-// The volume ceiling is picked in 10% steps; 0% = muted.
+// Volume/brightness ceilings are picked in 10% steps. Brightness never goes
+// fully dark (min 10%); volume 0% = muted.
 #define LEVEL_STEP 10
+#define BRIGHT_MIN_PCT 10
 
 // Big kid-facing text sizes (the theme's own sizes are used for header,
 // list rows and hints via resource_getFont)
@@ -273,12 +277,12 @@ static void sigHandler(int sig)
     }
 }
 
-// ----------------------------- volume cap ----------------------------------
-// The parent can cap the kid's max volume. Enforcement is a soft cap:
-// whenever the live value (system.json, kept current by keymon) sits above
-// the ceiling, we lower it back down and signal keymon to reload. keymon
-// owns the physical +/- buttons, so a kid can nudge past the cap briefly;
-// kid_mode_loop.sh's ticker calls the clamp below every ~10s.
+// ----------------------- volume / brightness caps --------------------------
+// The parent can cap the kid's max volume and brightness. Enforcement is a
+// soft cap: whenever the live value (system.json, kept current by keymon)
+// sits above the ceiling, we lower it back down and signal keymon to reload.
+// keymon owns the physical +/- buttons, so a kid can nudge past the cap
+// briefly; kid_mode_loop.sh's ticker calls the clamp below every ~10s.
 
 static int readSystemInt(const char *key, int fallback)
 {
@@ -319,6 +323,23 @@ static void clampVolume(int cap_pct)
     if (readSystemInt("vol", cap_raw) > cap_raw) {
         setVolume(cap_raw);
         writeSystemInt("vol", cap_raw);
+    }
+}
+
+// Lower the live brightness to the ceiling if it's above it. cap_pct 0..100
+// (floored at BRIGHT_MIN_PCT so the screen never goes fully dark).
+static void clampBrightness(int cap_pct)
+{
+    if (cap_pct < BRIGHT_MIN_PCT)
+        cap_pct = BRIGHT_MIN_PCT;
+    if (cap_pct >= 100)
+        return;
+    int cap_raw = cap_pct * MAX_BRIGHTNESS / 100;
+    if (cap_raw < 1)
+        cap_raw = 1;
+    if (readSystemInt("brightness", cap_raw) > cap_raw) {
+        display_setBrightness(cap_raw);
+        writeSystemInt("brightness", cap_raw);
     }
 }
 
@@ -601,6 +622,15 @@ static void formatVolume(void *self, char *out_label)
         sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
 }
 
+static void formatBrightness(void *self, char *out_label)
+{
+    ListItem *item = (ListItem *)self;
+    if (item->value * LEVEL_STEP >= 100)
+        strcpy(out_label, "100% (off)");
+    else
+        sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
+}
+
 // The parent menu is a real Onion list: full-width rows, the theme's list
 // font and selection background, and an Apps-menu-style value selector on
 // the "Add play time" row.
@@ -771,8 +801,10 @@ int main(int argc, char *argv[])
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
-    int menu_maxvol = 100; // volume ceiling shown in the menu (%)
-    int clamp_volume = -1; // headless: lower volume to this ceiling and exit
+    int menu_maxvol = 100;    // volume ceiling shown in the menu (%)
+    int menu_maxbright = 100; // brightness ceiling shown in the menu (%)
+    int clamp_volume = -1;    // headless: lower volume to this ceiling and exit
+    int clamp_brightness = -1;
     char pin_title[STR_MAX] = "";
 
     for (int i = 1; i < argc; i++) {
@@ -794,8 +826,12 @@ int main(int argc, char *argv[])
             menu_remaining = atoi(argv[++i]);
         else if (strcmp(argv[i], "--maxvol") == 0 && i + 1 < argc)
             menu_maxvol = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--maxbright") == 0 && i + 1 < argc)
+            menu_maxbright = atoi(argv[++i]);
         else if (strcmp(argv[i], "--clamp-volume") == 0 && i + 1 < argc)
             clamp_volume = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--clamp-brightness") == 0 && i + 1 < argc)
+            clamp_brightness = atoi(argv[++i]);
         else if ((strcmp(argv[i], "-t") == 0 ||
                   strcmp(argv[i], "--title") == 0) &&
                  i + 1 < argc)
@@ -806,6 +842,10 @@ int main(int argc, char *argv[])
     // Called on commit and by kid_mode_loop.sh's ticker every ~10s.
     if (clamp_volume >= 0) {
         clampVolume(clamp_volume);
+        return 0;
+    }
+    if (clamp_brightness >= 0) {
+        clampBrightness(clamp_brightness);
         return 0;
     }
 
@@ -837,11 +877,15 @@ int main(int argc, char *argv[])
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
 
-    // Clamp the ceiling passed in to whole 10% steps within range
+    // Clamp the ceilings passed in to whole 10% steps within range
     if (menu_maxvol < 0)
         menu_maxvol = 0;
     if (menu_maxvol > 100)
         menu_maxvol = 100;
+    if (menu_maxbright < BRIGHT_MIN_PCT)
+        menu_maxbright = BRIGHT_MIN_PCT;
+    if (menu_maxbright > 100)
+        menu_maxbright = 100;
 
     // Parent menu list (native Onion list component). Order must match the
     // MENU_* indices.
@@ -864,6 +908,13 @@ int main(int argc, char *argv[])
                                         .value_max = 100 / LEVEL_STEP,
                                         .value = menu_maxvol / LEVEL_STEP,
                                         .value_formatter = formatVolume});
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Max brightness",
+                            .item_type = MULTIVALUE,
+                            .value_min = BRIGHT_MIN_PCT / LEVEL_STEP,
+                            .value_max = 100 / LEVEL_STEP,
+                            .value = menu_maxbright / LEVEL_STEP,
+                            .value_formatter = formatBrightness});
     list_addItem(&menu_list,
                  (ListItem){.label = "Change PIN", .item_type = ACTION});
     list_addItem(&menu_list,
@@ -1050,6 +1101,15 @@ int main(int argc, char *argv[])
                                  menu_list.items[MENU_VOLUME].value *
                                      LEVEL_STEP);
                         writeResult("MENU", "VOLUME", pct);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_BRIGHTNESS) {
+                        char pct[16];
+                        snprintf(pct, sizeof(pct), "%d",
+                                 menu_list.items[MENU_BRIGHTNESS].value *
+                                     LEVEL_STEP);
+                        writeResult("MENU", "BRIGHTNESS", pct);
                         exit_code = 5;
                         quit = true;
                     }
