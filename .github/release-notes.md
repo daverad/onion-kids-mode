@@ -40,6 +40,22 @@ device.
 - **Long titles wrap** onto a second line instead of being cut off with an
   ellipsis.
 
+## Faster
+
+Arming went from ~15 seconds of black screen to about **1.5**. Three
+things were doing it, none of them what they looked like:
+
+- The RetroArch lock matched every setting against every line with a
+  regex built from a variable, which busybox awk recompiles each time —
+  ~133,000 compilations. Matching each line's key once and looking it up
+  in a hash: 14s → under 1s. (It also left duplicate keys later in the
+  file untouched, and RetroArch honours the last one, so a repeated key
+  silently defeated the lock.)
+- Every config read spawned `jq`. Reads now parse in the shell, with jq
+  kept for writes and as a fallback for any file the parser won't touch.
+- The timer state file cost three `sed` processes per read, and the
+  ticker reads it every 10 seconds.
+
 ## Also
 
 - README gains a settings table for `kidmode.json` and an FAQ (including
