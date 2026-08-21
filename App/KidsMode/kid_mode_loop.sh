@@ -1003,9 +1003,10 @@ pick_session_timer() {
     "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
 
-    # B on the picker means "back out of arming" — nothing has been changed
-    # yet at this point, so returning non-zero leaves the device in normal
-    # Onion. Playing with no timer is LEFT to "OFF", then A.
+    # A picks the shown value, B means "no timer" — both come back as a
+    # TIMER result. Anything else means kidui never got that far (crash,
+    # missing libs), and arming on a launcher that won't start would leave
+    # the device stuck, so bail out instead.
     if [ "$picker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "TIMER" ]; then
         rm -f "$uiresult"
         return 1
@@ -1378,7 +1379,7 @@ cmd_arm() {
     fi
 
     if ! pick_session_timer; then
-        infoPanel -t "Kids Mode" -m "Canceled.\nKids Mode was NOT armed." --auto
+        infoPanel -t "Kids Mode" -m "Couldn't start the launcher.\nKids Mode was NOT armed." --auto
         return 1
     fi
 

@@ -900,7 +900,8 @@ static void renderPickTimer(const char *title, int minutes, bool no_off)
              theme()->list.color, g_display.width - 40);
 
     theme_renderFooter(screen);
-    theme_renderStandardHint(screen, no_off ? "CONFIRM" : "START", "CANCEL");
+    theme_renderStandardHint(screen, no_off ? "CONFIRM" : "START",
+                             no_off ? "CANCEL" : "NO TIMER");
 }
 
 static void flip(void)
@@ -1174,12 +1175,19 @@ int main(int argc, char *argv[])
                     break;
                 }
                 case SW_BTN_B:
-                    // B backs out, both flows: cancels the add-time picker,
-                    // and cancels arming from the arm-time one. Playing with
-                    // no timer is LEFT to "OFF" then A, not a hidden meaning
-                    // for the back button.
-                    exit_code = 1;
-                    quit = true;
+                    if (picker_no_off) {
+                        // add-time flow: B cancels
+                        exit_code = 1;
+                        quit = true;
+                    }
+                    else {
+                        // arm flow: B is the shortcut past the picker —
+                        // straight into Kids Mode with no timer, which is
+                        // what the NO TIMER hint promises
+                        writeResult("TIMER", "0", NULL);
+                        exit_code = 5;
+                        quit = true;
+                    }
                     break;
                 default:
                     break;
