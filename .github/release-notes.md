@@ -1,6 +1,6 @@
 Everything a kid can reach is now locked down: RetroArch's in-game
 shortcuts, the blue-light toggle, and your save states. Plus longer play
-sessions, volume and brightness ceilings, and a PIN you can change on the
+sessions, screen brightness from the menu, and a PIN you can change on the
 device.
 
 ## Locked down while armed
@@ -24,7 +24,8 @@ device.
 
 - **Longer sessions**: the play timer now goes to **120 minutes**, up from
   50 — on the arm screen and on *Add play time*.
-- **Brightness** straight from the menu, in 10% steps down to 10%.
+- **Brightness** straight from the menu, changing as you move the row —
+  no confirm — in 10% steps down to 10%.
 - **Change PIN** on the device — no computer, no SD card reader.
 - **Auto-resume last game**: boot straight back into what the kid was
   playing instead of the carousel.
@@ -33,8 +34,9 @@ device.
 
 ## Carousel
 
-- **Battery level** on the kid screen, opposite the play-time chip, turning
-  accent-coloured under 15%.
+- **Battery level** on the kid screen, drawn exactly as Onion draws it
+  everywhere else (icon and level, top right), with the play-time chip
+  opposite it.
 - **X = RESTART** now has a footer hint and icon, so the start-over shortcut
   is visible instead of hidden.
 - **Long titles wrap** onto a second line instead of being cut off with an
