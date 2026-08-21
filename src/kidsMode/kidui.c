@@ -18,14 +18,15 @@
 //            "MENU" \n "ADDTIME" \n <minutes>   (inline add-time selector)
 //            "MENU" \n "NOTIMER"                (turn the play timer off)
 //            "TIMER" \n <minutes>               (--pick-timer mode)
-//            "MENU" \n "BRIGHTNESS" \n <percent> (brightness selector)
 //            "MENU" \n "CHANGEPIN"               (set a new PIN)
 //   exit 7:  "POWEROFF"  (Time's up screen sat idle for 5 minutes)
 //   exit 1:  canceled / error / nothing selected (result file removed)
 //
-// The auto-resume toggle is reported out-of-band in
-// /tmp/kidmode_autoresume_result ("1" or "0"), written the moment it is
-// flipped so it survives leaving the menu with B or Back.
+// The auto-resume toggle and the brightness level are reported out-of-band
+// in /tmp/kidmode_autoresume_result ("1" or "0") and
+// /tmp/kidmode_brightness_result (percent), written the moment they change
+// so they survive leaving the menu with B or Back. Brightness is also
+// applied to the screen there and then.
 //
 // PIN screens: UP/DOWN changes the digit, LEFT/RIGHT moves, A confirms
 // (START is a silent alias). --notice "..." shows a short message under the
@@ -69,7 +70,6 @@
 #include "components/list.h"
 #include "system/battery.h"
 #include "system/keymap_sw.h"
-#include "system/volume.h" // setVolume (0-20); MAX_VOLUME
 #include "theme/background.h"
 #include "theme/theme.h"
 #include "utils/flags.h"    // temp_flag_set (signals keymon to reload)
@@ -80,8 +80,9 @@
 #include "utils/sdl_init.h" // pulls in system/display.h: display_setBrightness
 #include "utils/str.h"
 
-// system/display.h (via sdl_init.h) defines MAX_BRIGHTNESS and
-// display_setBrightness(0-10); system/volume.h defines MAX_VOLUME (20).
+// display_setBrightness(0-10) comes from system/display.h and MAX_BRIGHTNESS
+// (10) from system/settings.h, both pulled in via sdl_init.h. The level is
+// stored in system.json as that same 0-10 value.
 #define SYSTEM_JSON "/mnt/SDCARD/system.json"
 
 #define MAX_GAMES 100
@@ -98,6 +99,9 @@
 // kid_mode_loop.sh reads this file however the menu is left (a menu action,
 // Back, or B), so the setting can't be lost by exiting the "wrong" way.
 #define AUTORESUME_FILE "/tmp/kidmode_autoresume_result"
+// Brightness is applied live as the row moves, so it is reported the same
+// way rather than waiting for a confirm that a parent has no reason to press.
+#define BRIGHTNESS_FILE "/tmp/kidmode_brightness_result"
 
 typedef enum { SCREEN_CAROUSEL,
                SCREEN_PIN,
@@ -755,6 +759,15 @@ static void writeAutoResume(int on)
     fclose(fp);
 }
 
+static void writeBrightness(int pct)
+{
+    FILE *fp = fopen(BRIGHTNESS_FILE, "w");
+    if (fp == NULL)
+        return;
+    fprintf(fp, "%d\n", pct);
+    fclose(fp);
+}
+
 // The parent menu is a real Onion list: full-width rows, the theme's list
 // font and selection background, and an Apps-menu-style value selector on
 // the "Add play time" row.
@@ -1204,22 +1217,28 @@ int main(int argc, char *argv[])
                     dirty = true;
                     break;
                 case SW_BTN_LEFT:
-                    // Value selector on the add-time row (Apps-menu style)
-                    if (list_keyLeft(&menu_list, false)) {
+                case SW_BTN_RIGHT: {
+                    // Value selectors on the add-time, brightness and
+                    // auto-resume rows (Apps-menu style)
+                    bool changed = changed_key == SW_BTN_LEFT
+                                       ? list_keyLeft(&menu_list, false)
+                                       : list_keyRight(&menu_list, false);
+                    if (changed) {
                         if (menu_list.active_pos == MENU_AUTORESUME)
                             writeAutoResume(
                                 menu_list.items[MENU_AUTORESUME].value);
+                        // Brightness takes effect as it moves — a level you
+                        // have to confirm before you can see it is no use
+                        else if (menu_list.active_pos == MENU_BRIGHTNESS) {
+                            int pct = menu_list.items[MENU_BRIGHTNESS].value *
+                                      LEVEL_STEP;
+                            applyBrightness(pct);
+                            writeBrightness(pct);
+                        }
                         dirty = true;
                     }
                     break;
-                case SW_BTN_RIGHT:
-                    if (list_keyRight(&menu_list, false)) {
-                        if (menu_list.active_pos == MENU_AUTORESUME)
-                            writeAutoResume(
-                                menu_list.items[MENU_AUTORESUME].value);
-                        dirty = true;
-                    }
-                    break;
+                }
                 case SW_BTN_A:
                 case SW_BTN_START:
                     if (menu_list.active_pos == MENU_UNLOCK) {
@@ -1241,19 +1260,11 @@ int main(int argc, char *argv[])
                         exit_code = 5;
                         quit = true;
                     }
-                    else if (menu_list.active_pos == MENU_BRIGHTNESS) {
-                        char pct[16];
-                        snprintf(pct, sizeof(pct), "%d",
-                                 menu_list.items[MENU_BRIGHTNESS].value *
-                                     LEVEL_STEP);
-                        writeResult("MENU", "BRIGHTNESS", pct);
-                        exit_code = 5;
-                        quit = true;
-                    }
-                    else if (menu_list.active_pos == MENU_AUTORESUME) {
-                        // Nothing to confirm — the flip was already
-                        // published — so A stays put instead of dropping
-                        // the parent out of the menu like Back does
+                    else if (menu_list.active_pos == MENU_AUTORESUME ||
+                             menu_list.active_pos == MENU_BRIGHTNESS) {
+                        // Nothing to confirm — both rows take effect as they
+                        // move — so A stays put instead of dropping the
+                        // parent out of the menu like Back does
                     }
                     else if (menu_list.active_pos == MENU_CHANGEPIN) {
                         writeResult("MENU", "CHANGEPIN", NULL);

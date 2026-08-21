@@ -99,10 +99,10 @@ welcome.
      back into the kid launcher.
    - **Turn off timer:** removes any running timer (unlimited play until you
      re-arm or add time again).
-   - **Brightness:** **◀ ▶** sets the screen brightness in 10% steps, down
-     to 10% (never fully dark). It applies immediately and is restored at
-     the start of the next session. MENU+VOLUME still works in-game, so a
-     kid can change it back — this is a convenience, not a lock.
+   - **Brightness:** **◀ ▶** changes the screen brightness as you move it,
+     in 10% steps down to 10% (never fully dark) — no confirm needed, and
+     it's remembered for the next session. MENU+VOLUME still works in-game,
+     so a kid can change it back; this is a convenience, not a lock.
    - **Auto-resume last game:** **◀ ▶** flips it On/Off. On means the next
      boot goes straight into the last game the kid played instead of the
      carousel (it falls back to the carousel if that game is gone). The

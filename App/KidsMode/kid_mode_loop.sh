@@ -55,6 +55,7 @@ ticker_pid_file=/tmp/kidmode_ticker.pid
 # stack prints noise on stdout, which broke first-line parsing on hardware.
 uiresult=/tmp/kidmode_ui_result
 autoresume_result=/tmp/kidmode_autoresume_result
+brightness_result=/tmp/kidmode_brightness_result
 uilog=/tmp/kidmode_ui_log
 
 export LD_LIBRARY_PATH="/lib:/config/lib:$miyoodir/lib:$sysdir/lib:$sysdir/lib/parasyte"
@@ -1051,7 +1052,7 @@ change_pin() {
 
 parent_menu() {
     while :; do
-        rm -f "$uiresult" "$autoresume_result"
+        rm -f "$uiresult" "$autoresume_result" "$brightness_result"
         ar_val=0
         [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
         "$kidui_bin" --parent-menu \
@@ -1064,6 +1065,22 @@ parent_menu() {
         # deferred to some specific exit action), so sync it into
         # kidmode.json regardless of how the menu was left — Back, B, or
         # any other action below.
+        # Brightness is applied to the screen by kidui as the row moves;
+        # all that is left here is remembering it for the next session.
+        if [ -f "$brightness_result" ]; then
+            new_bright="$(sed -n 1p "$brightness_result")"
+            rm -f "$brightness_result"
+            case "$new_bright" in
+                '' | *[!0-9]*) ;;
+                *)
+                    [ "$new_bright" -gt 100 ] && new_bright=100
+                    [ "$new_bright" -lt 10 ] && new_bright=10
+                    config_merge --argjson b "$new_bright" '.brightness_pct = $b'
+                    log "Brightness set to ${new_bright}% from the parent menu."
+                    ;;
+            esac
+        fi
+
         if [ -f "$autoresume_result" ]; then
             new_ar_val="$(sed -n 1p "$autoresume_result")"
             rm -f "$autoresume_result"
@@ -1101,20 +1118,6 @@ parent_menu() {
                 update_remaining_now
                 log "Play timer turned off from the parent menu."
                 return 1
-                ;;
-            BRIGHTNESS)
-                # Set the screen brightness now and remember it. Stay in the
-                # menu so the parent can change more than one thing.
-                case "$menu_arg" in
-                    '' | *[!0-9]*) ;;
-                    *)
-                        [ "$menu_arg" -gt 100 ] && menu_arg=100
-                        [ "$menu_arg" -lt 10 ] && menu_arg=10
-                        config_merge --argjson v "$menu_arg" '.brightness_pct = $v'
-                        "$kidui_bin" --set-brightness "$menu_arg" > /dev/null 2>&1
-                        log "Brightness set to ${menu_arg}%."
-                        ;;
-                esac
                 ;;
             CHANGEPIN)
                 change_pin
@@ -1383,11 +1386,8 @@ cmd_arm() {
         return 1
     fi
 
-    # Arming rewrites four files and moves three folders; on a slow card the
-    # sync after each one is what turns this into a long black screen. Say
-    # what is happening, do the work, and flush once at the end.
-    infoPanel -t "Kids Mode" -m "Starting Kids Mode..." --auto &
-
+    # Arming rewrites four files and moves three folders, then flushes once
+    # at the end rather than after each step.
     log "Arming: applying locks and swapping the kid's profile..."
     apply_ra_lock
     apply_blf_lock
