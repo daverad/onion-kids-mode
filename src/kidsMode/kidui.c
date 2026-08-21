@@ -64,6 +64,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "components/JsonGameEntry.h"
@@ -135,6 +136,19 @@ typedef enum { SCREEN_CAROUSEL,
 #define INFO_FONT_SIZE 22
 
 static bool quit = false;
+
+// Startup timing, reported on stderr (kid_mode_loop.sh folds these into
+// kidmode.log). The launcher starts twice per arm — once for the timer
+// picker, once for the carousel — so its start-up cost is paid twice and
+// is worth being able to see.
+static double nowMs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static double t_start = 0;
 
 static JsonGameEntry games[MAX_GAMES];
 static int games_count = 0;
@@ -934,6 +948,7 @@ static void flip(void)
 
 int main(int argc, char *argv[])
 {
+    t_start = nowMs();
     bool set_pin_mode = false;
     bool menu_mode = false;
     bool pick_timer_mode = false;
@@ -998,6 +1013,7 @@ int main(int argc, char *argv[])
 
     if (!SDL_InitDefault())
         return 1;
+    fprintf(stderr, "kidui: sdl ready at %.0f ms\n", nowMs() - t_start);
 
     // Theme fonts: header/list/hint come straight from the active theme via
     // resource_getFont; these two are the same families at kid-friendly sizes
@@ -1009,6 +1025,7 @@ int main(int argc, char *argv[])
         theme_loadFont(theme()->path, theme()->title.font, BIG_VALUE_FONT_SIZE);
     font_info = theme_loadFont(theme()->path, theme()->list.font,
                                INFO_FONT_SIZE);
+    fprintf(stderr, "kidui: fonts ready at %.0f ms\n", nowMs() - t_start);
 
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
@@ -1461,6 +1478,11 @@ int main(int argc, char *argv[])
             if (hold_started != 0)
                 renderHoldBar(ticks - hold_started);
             flip();
+            if (t_start > 0) {
+                fprintf(stderr, "kidui: first frame at %.0f ms\n",
+                        nowMs() - t_start);
+                t_start = 0; // once per run
+            }
             dirty = false;
         }
 

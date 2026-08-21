@@ -66,6 +66,17 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$logfile"
 }
 
+# kidui reports its own start-up timings on stderr (which lands in $uilog).
+# Fold them into the log so the launcher's cost sits next to the arming
+# steps — it starts twice per arm, and that gap is otherwise invisible.
+log_ui_timings() {
+    [ -f "$uilog" ] || return 0
+    grep "ms$" "$uilog" 2> /dev/null | grep "^kidui: " | while read -r _t; do
+        log "$_t"
+    done
+    return 0
+}
+
 # --------------------------- PIN handling ----------------------------------
 
 hash_string() {
@@ -1003,6 +1014,7 @@ pick_session_timer() {
     rm -f "$uiresult"
     "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
+    log_ui_timings
 
     # A picks the shown value, B means "no timer" — both come back as a
     # TIMER result. Anything else means kidui never got that far (crash,
@@ -1185,6 +1197,7 @@ cmd_run() {
 
     ui_fails=0
     pin_fails=0
+    ui_timed=0
     pin_notice=""
     update_remaining_now
 
@@ -1257,6 +1270,12 @@ cmd_run() {
             "$kidui_bin" > "$uilog" 2>&1
         fi
         ui_rc=$?
+        # Only the first launcher start per session — after that it is the
+        # same cost on every return from a game, and just noise in the log
+        if [ "$ui_timed" != "1" ]; then
+            ui_timed=1
+            log_ui_timings
+        fi
         pin_notice=""
 
         check_off_order "End"
