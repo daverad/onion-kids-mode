@@ -52,7 +52,7 @@ and an optional play timer.
 
 | ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
 | :--: | :--: | :--: |
-| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list: play time, volume/brightness caps, auto-resume and change PIN (shot before the auto-resume row; due a re-shoot)* | *The PIN gate — set once when arming; **A** confirms* |
+| *The kid's carousel — one favorite at a time, box art and all; **A** plays, **X** starts over* | *Parent menu — play time with a live preview in the header, brightness, auto-resume and change PIN* | *The PIN gate — set once when arming; **A** confirms*
 
 *(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
 your device uses.)*

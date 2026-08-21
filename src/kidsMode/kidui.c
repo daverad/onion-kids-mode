@@ -797,17 +797,20 @@ static void renderMenu(List *list, int remaining)
     // for) lives as a compact chip on the empty left side of the header bar.
     // The title is centered and starts well to the right, so a short left
     // chip never overlaps it.
+    // Kept short on purpose: the theme's HINT face is wide and the centred
+    // title starts around x=240, so "12 min left" and "12 min -> off" were
+    // being cut to "12 min...". The row itself supplies the units.
     char chip[64] = "";
     int rem_min = remaining >= 0 ? (remaining + 59) / 60 : -1;
     int add_min = list->items[MENU_ADDTIME].value * TIMER_STEP;
     if (rem_min >= 0) {
         if (list->active_pos == MENU_ADDTIME)
-            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 %d min", rem_min,
+            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 %d", rem_min,
                      rem_min + add_min);
         else if (list->active_pos == MENU_NOTIMER)
-            snprintf(chip, sizeof(chip), "%d min \xE2\x86\x92 off", rem_min);
+            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 off", rem_min);
         else
-            snprintf(chip, sizeof(chip), "%d min left", rem_min);
+            snprintf(chip, sizeof(chip), "%d min", rem_min);
     }
     else if (list->active_pos == MENU_ADDTIME) {
         snprintf(chip, sizeof(chip), "+%d min", add_min);
@@ -815,11 +818,9 @@ static void renderMenu(List *list, int remaining)
     else {
         strcpy(chip, "No timer");
     }
-    // Same font as the battery level opposite it, so the header bar reads
-    // as one row rather than two mismatched labels
     drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
                   resource_getFont(HINT), theme()->hint.color,
-                  (int)(150.0 * g_scale), TEXT_LEFT);
+                  (int)(210.0 * g_scale), TEXT_LEFT);
 
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "OK", "BACK");
