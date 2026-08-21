@@ -257,12 +257,18 @@ apply_ra_lock() {
         cp "$racfg" "$rabackup"
     fi
 
-    # Every setting below used to go through ra_set (one grep + one sed —
-    # a full read+rewrite of retroarch.cfg — per call). With ~70 settings
-    # that was up to 140 full passes over the file, adding a multi-second
-    # stall between confirming the timer and reaching the carousel. This
-    # applies all of them in a single awk pass instead: one read, one
-    # write, regardless of how many settings there are.
+    # All ~70 settings are applied in a single awk pass: one read, one
+    # write, however many settings there are.
+    #
+    # The pass matches each line's key ONCE and looks it up in a hash. The
+    # obvious alternative — loop over the settings per line and test
+    # $0 ~ ("^[ \t]*" key[i] "...") — makes busybox awk recompile a
+    # computed regex for every (line x setting) pair. On device that was
+    # ~1900 lines x 70 settings and took 14 seconds of black screen at arm
+    # time, seven times slower than the naive grep+sed version it replaced.
+    # It also left duplicate keys later in the file untouched, and
+    # RetroArch honours the last occurrence — so a config with a repeated
+    # key silently defeated the lock. Matching per line fixes both.
     #
     #   kiosk_mode_enable true — locks down the in-game quick menu
     #   video_font_enable true — timer countdown arrives via RA's OSD
@@ -327,34 +333,31 @@ apply_ra_lock() {
     awkprog=/tmp/kidmode_ra_awk.$$
     {
         echo 'BEGIN {'
-        i=0
         for k in $ra_keys; do
-            i=$((i + 1))
             case "$k" in
                 kiosk_mode_enable | video_font_enable) v=true ;;
                 quick_menu_show_* | settings_show_*) v=false ;;
                 *) v=nul ;;
             esac
-            printf '  key[%d]="%s"; val[%d]="%s";\n' "$i" "$k" "$i" "$v"
+            printf '  val["%s"]="%s";\n' "$k" "$v"
         done
-        echo "  n=$i"
         echo '}'
         cat << 'AWKEOF'
 {
-    matched = 0
-    for (i = 1; i <= n; i++) {
-        if (!done[i] && $0 ~ ("^[ \t]*" key[i] "[ \t]*=")) {
-            print key[i] " = \"" val[i] "\""
-            done[i] = 1
-            matched = 1
-            break
+    if (match($0, /^[ \t]*[A-Za-z0-9_]+[ \t]*=/)) {
+        k = substr($0, RSTART, RLENGTH)
+        gsub(/[ \t=]/, "", k)
+        if (k in val) {
+            print k " = \"" val[k] "\""
+            seen[k] = 1
+            next
         }
     }
-    if (!matched) print $0
+    print $0
 }
 END {
-    for (i = 1; i <= n; i++)
-        if (!done[i]) print key[i] " = \"" val[i] "\""
+    for (k in val)
+        if (!(k in seen)) print k " = \"" val[k] "\""
 }
 AWKEOF
     } > "$awkprog"
