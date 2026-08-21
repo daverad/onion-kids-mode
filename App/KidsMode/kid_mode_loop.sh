@@ -361,7 +361,6 @@ AWKEOF
 
     awk -f "$awkprog" "$racfg" > "$tmpra" && mv -f "$tmpra" "$racfg"
     rm -f "$awkprog"
-    sync
     log "RetroArch kiosk lock applied (in-game hotkeys disabled), single pass."
 }
 
@@ -405,7 +404,6 @@ apply_blf_lock() {
         } > "$tmpblf"
         mv -f "$tmpblf" "$blfscript"
         chmod +x "$blfscript" 2> /dev/null
-        sync
         log "MENU+B blue-light toggle disabled while armed."
     fi
 }
@@ -459,7 +457,6 @@ apply_profile_isolation() {
             mkdir -p "$current_profile/$d"
         fi
     done
-    sync
     log "Switched to the kid's own saves/states/thumbnails for this session."
 }
 
@@ -499,7 +496,6 @@ apply_keymap_override() {
         touch "$keymapnone"
         printf '{\n    "ingame_single_press": 2\n}\n' > "$keymapcfg"
     fi
-    sync
     killall keymon 2> /dev/null
     keymon &
     log "MENU button set to exit-to-launcher while armed."
@@ -544,24 +540,16 @@ get_timer_minutes() {
 # src/kidsMode/kidui.c
 timer_max=120
 
-# ------------------------- volume / brightness caps ------------------------
-# Optional ceilings (percent, 10% steps) the kid can't exceed. kidui does the
-# actual clamping (it can call setVolume / display_setBrightness and poke
-# keymon); the shell just stores the ceiling and asks kidui to enforce it on
-# change and on every ticker tick. Absent / 100 = no cap.
+# ------------------------------ brightness ---------------------------------
+# The parent sets the screen brightness from the menu; kidui writes it to
+# system.json and pokes the backlight. Stored so a session starts at the
+# level the parent chose. Absent = leave the screen alone.
+# (There is no volume equivalent: see the note in apply_brightness.)
 
-get_max_volume_pct() {
-    v="$(config_get max_volume_pct)"
+get_brightness_pct() {
+    v="$(config_get brightness_pct)"
     case "$v" in
-        '' | *[!0-9]*) echo 100 ;;
-        *) [ "$v" -gt 100 ] && echo 100 || echo "$v" ;;
-    esac
-}
-
-get_max_brightness_pct() {
-    v="$(config_get max_brightness_pct)"
-    case "$v" in
-        '' | *[!0-9]*) echo 100 ;;
+        '' | *[!0-9]*) echo -1 ;; # never set: leave the screen as it is
         *)
             [ "$v" -gt 100 ] && v=100
             [ "$v" -lt 10 ] && v=10 # never let the screen go fully dark
@@ -570,14 +558,17 @@ get_max_brightness_pct() {
     esac
 }
 
-# Enforce the ceilings now (no-ops when set to 100% / no cap, and when the
-# live level is already at or below the ceiling).
-enforce_caps() {
+# Apply the stored brightness, if there is one.
+#
+# NB there is deliberately no volume counterpart. A stored ceiling was tried
+# and did nothing audible: while a game is running the level is owned by the
+# already-running audioserver, and a short-lived helper calling setVolume
+# can't reach it. Capping it for real needs keymon patched, which this
+# project stays out of by design.
+apply_brightness() {
     [ -x "$kidui_bin" ] || return 0
-    vcap="$(get_max_volume_pct)"
-    [ "$vcap" -lt 100 ] && "$kidui_bin" --clamp-volume "$vcap" > /dev/null 2>&1
-    bcap="$(get_max_brightness_pct)"
-    [ "$bcap" -lt 100 ] && "$kidui_bin" --clamp-brightness "$bcap" > /dev/null 2>&1
+    bpct="$(get_brightness_pct)"
+    [ "$bpct" -ge 0 ] && "$kidui_bin" --set-brightness "$bpct" > /dev/null 2>&1
     return 0
 }
 
@@ -687,10 +678,6 @@ ticker_loop() {
         sleep 10
         [ -f "$flagfile" ] || break
         [ -f /tmp/shutting_down ] && break
-
-        # Re-assert the volume/brightness ceilings if the kid nudged past
-        # them with the physical buttons (keymon owns those live).
-        enforce_caps
 
         budget=$(($(get_timer_minutes) * 60 + $(state_bonus)))
         if [ "$budget" -le 0 ]; then
@@ -1013,14 +1000,19 @@ pick_session_timer() {
     "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
 
-    picked=0
-    if [ "$picker_rc" -eq 5 ] && [ "$(sed -n 1p "$uiresult")" = "TIMER" ]; then
-        picked="$(sed -n 2p "$uiresult")"
-        case "$picked" in
-            '' | *[!0-9]*) picked=0 ;;
-        esac
-        [ "$picked" -gt "$timer_max" ] && picked="$timer_max"
+    # B on the picker means "back out of arming" — nothing has been changed
+    # yet at this point, so returning non-zero leaves the device in normal
+    # Onion. Playing with no timer is LEFT to "OFF", then A.
+    if [ "$picker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "TIMER" ]; then
+        rm -f "$uiresult"
+        return 1
     fi
+
+    picked="$(sed -n 2p "$uiresult")"
+    case "$picked" in
+        '' | *[!0-9]*) picked=0 ;;
+    esac
+    [ "$picked" -gt "$timer_max" ] && picked="$timer_max"
     rm -f "$uiresult"
 
     set_timer_minutes "$picked"
@@ -1060,8 +1052,7 @@ parent_menu() {
         [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
         "$kidui_bin" --parent-menu \
             --remaining "$(timer_remaining)" \
-            --maxvol "$(get_max_volume_pct)" \
-            --maxbright "$(get_max_brightness_pct)" \
+            --brightness "$(get_brightness_pct)" \
             --autoresume "$ar_val" > "$uilog" 2>&1
         menu_rc=$?
 
@@ -1107,30 +1098,17 @@ parent_menu() {
                 log "Play timer turned off from the parent menu."
                 return 1
                 ;;
-            VOLUME)
-                # Store the new volume ceiling and enforce it now. Stay in
-                # the menu so the parent can tweak more settings.
-                case "$menu_arg" in
-                    '' | *[!0-9]*) ;;
-                    *)
-                        [ "$menu_arg" -gt 100 ] && menu_arg=100
-                        config_merge --argjson v "$menu_arg" '.max_volume_pct = $v'
-                        [ "$menu_arg" -lt 100 ] &&
-                            "$kidui_bin" --clamp-volume "$menu_arg" > /dev/null 2>&1
-                        log "Max volume set to ${menu_arg}%."
-                        ;;
-                esac
-                ;;
             BRIGHTNESS)
+                # Set the screen brightness now and remember it. Stay in the
+                # menu so the parent can change more than one thing.
                 case "$menu_arg" in
                     '' | *[!0-9]*) ;;
                     *)
                         [ "$menu_arg" -gt 100 ] && menu_arg=100
                         [ "$menu_arg" -lt 10 ] && menu_arg=10
-                        config_merge --argjson v "$menu_arg" '.max_brightness_pct = $v'
-                        [ "$menu_arg" -lt 100 ] &&
-                            "$kidui_bin" --clamp-brightness "$menu_arg" > /dev/null 2>&1
-                        log "Max brightness set to ${menu_arg}%."
+                        config_merge --argjson v "$menu_arg" '.brightness_pct = $v'
+                        "$kidui_bin" --set-brightness "$menu_arg" > /dev/null 2>&1
+                        log "Brightness set to ${menu_arg}%."
                         ;;
                 esac
                 ;;
@@ -1209,9 +1187,8 @@ cmd_run() {
         backup_pin
     fi
 
-    # Apply any stored volume/brightness ceilings right away (the ticker
-    # keeps re-asserting them thereafter)
-    enforce_caps
+    # Start the session at the brightness the parent picked
+    apply_brightness
 
     start_ticker
 
@@ -1397,13 +1374,23 @@ cmd_arm() {
         return 1
     fi
 
-    pick_session_timer
+    if ! pick_session_timer; then
+        infoPanel -t "Kids Mode" -m "Canceled.\nKids Mode was NOT armed." --auto
+        return 1
+    fi
 
+    # Arming rewrites four files and moves three folders; on a slow card the
+    # sync after each one is what turns this into a long black screen. Say
+    # what is happening, do the work, and flush once at the end.
+    infoPanel -t "Kids Mode" -m "Starting Kids Mode..." --auto &
+
+    log "Arming: applying locks and swapping the kid's profile..."
     apply_ra_lock
     apply_blf_lock
     apply_profile_isolation
     apply_keymap_override
     ensure_fav_shortcut
+    apply_brightness
     touch "$flagfile"
     sync
     log "Kid Mode armed (timer: $(get_timer_minutes) min)."

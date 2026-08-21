@@ -24,9 +24,9 @@ and an optional play timer.
 - **Parent menu** (hold **SELECT+START 3 s** → PIN): exit Kids Mode, add
   play time right on the menu row — **◀ ▶** picks +5…+120 min,
   **A**/**START** applies, and the header previews the remaining time before
-  and after — **turn the timer off entirely**, cap the **max volume**
-  (Mute–100%) and **max brightness** (10–100%) the kid can reach, flip
-  **auto-resume**, or **change the PIN** — all without leaving the launcher.
+  and after — **turn the timer off entirely**, set the **screen
+  brightness**, flip **auto-resume**, or **change the PIN** — all without
+  leaving the launcher.
 - **Start over**: **X** on a game asks "Start over?" and launches from the
   beginning without touching in-game saves.
 - **MENU button in-game saves and exits** back to the carousel.
@@ -92,18 +92,17 @@ welcome.
    | everything else | does nothing — no dead ends |
 
 4. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
-   *Exit Kids Mode / Add play time / Turn off timer / Max volume /
-   Max brightness / Auto-resume last game / Change PIN / Back*.
+   *Exit Kids Mode / Add play time / Turn off timer / Brightness /
+   Auto-resume last game / Change PIN / Back*.
    - **Add play time:** **◀ ▶** picks the amount (the header shows what the
      remaining time becomes), **A**/**START** applies — you drop straight
      back into the kid launcher.
    - **Turn off timer:** removes any running timer (unlimited play until you
      re-arm or add time again).
-   - **Max volume / Max brightness:** **◀ ▶** sets the ceiling in 10% steps
-     (volume down to Mute; brightness down to 10%). The kid can't go above
-     it. *Soft cap:* the physical volume/brightness buttons are handled by
-     Onion's `keymon`, so a kid can briefly nudge past the ceiling — Kids
-     Mode pulls it back within ~10 seconds. Set to **100%** to remove a cap.
+   - **Brightness:** **◀ ▶** sets the screen brightness in 10% steps, down
+     to 10% (never fully dark). It applies immediately and is restored at
+     the start of the next session. MENU+VOLUME still works in-game, so a
+     kid can change it back — this is a convenience, not a lock.
    - **Auto-resume last game:** **◀ ▶** flips it On/Off. On means the next
      boot goes straight into the last game the kid played instead of the
      carousel (it falls back to the carousel if that game is gone). The
@@ -124,8 +123,7 @@ resetting it):
 | --- | --- | --- |
 | `lock_retroarch_hotkeys` | `true` | Unbinds every documented RetroArch in-game hotkey while armed. Set to `false` to keep stock RetroArch shortcuts — the kiosk settings (hidden menus) still apply either way. |
 | `auto_resume_last_game` | `false` | Boot straight into the kid's last game instead of the carousel. Also on the parent menu, which is the easier place to change it. |
-| `max_volume_pct` | `100` | Volume ceiling. Normally set from the parent menu. |
-| `max_brightness_pct` | `100` | Brightness ceiling (floor 10%). Normally set from the parent menu. |
+| `brightness_pct` | unset | Screen brightness applied at the start of each session (floor 10%). Normally set from the parent menu. |
 | `fav_shortcut` | `false` | Adds a **Kids Mode** entry to Onion's Favorites tab so arming doesn't need the Apps tab. Off by default because it can clutter MainUI's search results. |
 
 Changes take effect the next time you arm Kids Mode. Note that updating the

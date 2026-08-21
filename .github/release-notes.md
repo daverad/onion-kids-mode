@@ -24,8 +24,7 @@ device.
 
 - **Longer sessions**: the play timer now goes to **120 minutes**, up from
   50 — on the arm screen and on *Add play time*.
-- **Max volume** (Mute–100%) and **max brightness** (10–100%) ceilings the
-  kid can't exceed, in 10% steps.
+- **Brightness** straight from the menu, in 10% steps down to 10%.
 - **Change PIN** on the device — no computer, no SD card reader.
 - **Auto-resume last game**: boot straight back into what the kid was
   playing instead of the carousel.

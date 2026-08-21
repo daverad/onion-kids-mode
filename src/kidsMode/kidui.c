@@ -18,8 +18,7 @@
 //            "MENU" \n "ADDTIME" \n <minutes>   (inline add-time selector)
 //            "MENU" \n "NOTIMER"                (turn the play timer off)
 //            "TIMER" \n <minutes>               (--pick-timer mode)
-//            "MENU" \n "VOLUME" \n <percent>     (max-volume selector)
-//            "MENU" \n "BRIGHTNESS" \n <percent> (max-brightness selector)
+//            "MENU" \n "BRIGHTNESS" \n <percent> (brightness selector)
 //            "MENU" \n "CHANGEPIN"               (set a new PIN)
 //   exit 7:  "POWEROFF"  (Time's up screen sat idle for 5 minutes)
 //   exit 1:  canceled / error / nothing selected (result file removed)
@@ -40,8 +39,7 @@
 //                                  that rom instead of the first favorite
 //   kidui --set-pin -t "..." [--notice "..."]
 //                                  PIN entry only (for initial PIN setup)
-//   kidui --parent-menu --remaining S [--maxvol P] [--maxbright P]
-//         [--autoresume 0|1]
+//   kidui --parent-menu --remaining S [--brightness P] [--autoresume 0|1]
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
@@ -112,16 +110,14 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_UNLOCK 0
 #define MENU_ADDTIME 1
 #define MENU_NOTIMER 2
-#define MENU_VOLUME 3
-#define MENU_BRIGHTNESS 4
-#define MENU_AUTORESUME 5
-#define MENU_CHANGEPIN 6
-#define MENU_BACK 7
-#define MENU_ROWS 8
+#define MENU_BRIGHTNESS 3
+#define MENU_AUTORESUME 4
+#define MENU_CHANGEPIN 5
+#define MENU_BACK 6
+#define MENU_ROWS 7
 #define TIMER_STEP 5
 #define TIMER_MAX 120
-// Volume/brightness ceilings are picked in 10% steps. Brightness never goes
-// fully dark (min 10%); volume 0% = muted.
+// Brightness is picked in 10% steps and never goes fully dark (min 10%).
 #define LEVEL_STEP 10
 #define BRIGHT_MIN_PCT 10
 
@@ -331,35 +327,28 @@ static void writeSystemInt(const char *key, int value)
     temp_flag_set("settings_changed", true);
 }
 
-// Lower the live volume to the ceiling if it's above it. cap_pct 0..100.
-static void clampVolume(int cap_pct)
+// Set the screen brightness, floored so it never goes fully dark.
+static void applyBrightness(int pct)
 {
-    if (cap_pct < 0)
-        cap_pct = 0;
-    if (cap_pct >= 100)
-        return; // 100% = no cap
-    int cap_raw = cap_pct * MAX_VOLUME / 100;
-    if (readSystemInt("vol", cap_raw) > cap_raw) {
-        setVolume(cap_raw);
-        writeSystemInt("vol", cap_raw);
-    }
+    if (pct < BRIGHT_MIN_PCT)
+        pct = BRIGHT_MIN_PCT;
+    if (pct > 100)
+        pct = 100;
+    int raw = pct * MAX_BRIGHTNESS / 100;
+    if (raw < 1)
+        raw = 1; // never fully dark
+    display_setBrightness(raw);
+    writeSystemInt("brightness", raw);
 }
 
-// Lower the live brightness to the ceiling if it's above it. cap_pct 0..100
-// (floored at BRIGHT_MIN_PCT so the screen never goes fully dark).
-static void clampBrightness(int cap_pct)
+// The stored percentage, read back so the menu row opens on the level the
+// screen is actually at.
+static int currentBrightnessPct(void)
 {
-    if (cap_pct < BRIGHT_MIN_PCT)
-        cap_pct = BRIGHT_MIN_PCT;
-    if (cap_pct >= 100)
-        return;
-    int cap_raw = cap_pct * MAX_BRIGHTNESS / 100;
-    if (cap_raw < 1)
-        cap_raw = 1;
-    if (readSystemInt("brightness", cap_raw) > cap_raw) {
-        display_setBrightness(cap_raw);
-        writeSystemInt("brightness", cap_raw);
-    }
+    int raw = readSystemInt("brightness", -1);
+    if (raw < 0)
+        return -1;
+    return raw * 100 / MAX_BRIGHTNESS;
 }
 
 static void loadFavorites(void)
@@ -524,26 +513,6 @@ static int readRemaining(void)
 
 // Small "12 min" chip in the top-right corner (where MainUI keeps its
 // battery), switching to the accent color for the last 5 minutes
-// Battery on the kid screen, mirroring the play-time chip on the other
-// side. The carousel draws no header bar, so it can't use Onion's
-// theme_renderHeaderBattery the way the menu and PIN screens do — same
-// idea, same HINT font, drawn by hand. Turns accent-coloured when it's
-// low, like the timer does in its last five minutes.
-#define BATTERY_LOW_PCT 15
-
-static void renderBatteryChip(void)
-{
-    int pct = batteryPercentage();
-    if (pct < 0)
-        return;
-    char chip[16];
-    snprintf(chip, sizeof(chip), "%d%%", pct);
-    SDL_Color color =
-        pct <= BATTERY_LOW_PCT ? accentColor() : theme()->hint.color;
-    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
-                  resource_getFont(HINT), color, 0, TEXT_LEFT);
-}
-
 // X already restarts a game; this is the footer hint that says so, next to
 // the theme's own A/PLAY hint. The icon ships with the app (contributed
 // with the feature) — if it's missing the label alone still reads fine.
@@ -660,8 +629,10 @@ static void renderTimeChip(int remaining)
     char chip[32];
     snprintf(chip, sizeof(chip), "%d min", mins);
     SDL_Color color = mins <= 5 ? accentColor() : theme()->hint.color;
-    drawTextAlign(chip, (int)(620.0 * g_scale), (int)(30.0 * g_scale),
-                  resource_getFont(HINT), color, 0, TEXT_RIGHT);
+    // Left corner: the right one belongs to the battery, exactly where
+    // Onion puts it on every other screen
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
+                  resource_getFont(HINT), color, 0, TEXT_LEFT);
 }
 
 static void renderCarousel(int remaining)
@@ -712,7 +683,9 @@ static void renderCarousel(int remaining)
         theme_renderFooterStatus(screen, current + 1, games_count);
 
     renderTimeChip(remaining);
-    renderBatteryChip();
+    // Onion's own battery rendering (icon + level, top right) — the same
+    // call the menu and PIN screens make, so it looks identical there
+    theme_renderHeaderBattery(screen, batteryPercentage());
 }
 
 static void renderEmpty(void)
@@ -760,24 +733,9 @@ static void formatAddMinutes(void *self, char *out_label)
     sprintf(out_label, "+%d min", item->value * TIMER_STEP);
 }
 
-static void formatVolume(void *self, char *out_label)
-{
-    ListItem *item = (ListItem *)self;
-    if (item->value == 0)
-        strcpy(out_label, "Mute");
-    else if (item->value * LEVEL_STEP >= 100)
-        strcpy(out_label, "100% (off)");
-    else
-        sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
-}
-
 static void formatBrightness(void *self, char *out_label)
 {
-    ListItem *item = (ListItem *)self;
-    if (item->value * LEVEL_STEP >= 100)
-        strcpy(out_label, "100% (off)");
-    else
-        sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
+    sprintf(out_label, "%d%%", ((ListItem *)self)->value * LEVEL_STEP);
 }
 
 static void formatOnOff(void *self, char *out_label)
@@ -830,8 +788,11 @@ static void renderMenu(List *list, int remaining)
     else {
         strcpy(chip, "No timer");
     }
-    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale), font_info,
-                  theme()->hint.color, (int)(150.0 * g_scale), TEXT_LEFT);
+    // Same font as the battery level opposite it, so the header bar reads
+    // as one row rather than two mismatched labels
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
+                  resource_getFont(HINT), theme()->hint.color,
+                  (int)(150.0 * g_scale), TEXT_LEFT);
 
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "OK", "BACK");
@@ -939,8 +900,7 @@ static void renderPickTimer(const char *title, int minutes, bool no_off)
              theme()->list.color, g_display.width - 40);
 
     theme_renderFooter(screen);
-    theme_renderStandardHint(screen, no_off ? "CONFIRM" : "START",
-                             no_off ? "CANCEL" : "NO TIMER");
+    theme_renderStandardHint(screen, no_off ? "CONFIRM" : "START", "CANCEL");
 }
 
 static void flip(void)
@@ -967,10 +927,8 @@ int main(int argc, char *argv[])
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
-    int menu_maxvol = 100;    // volume ceiling shown in the menu (%)
-    int menu_maxbright = 100; // brightness ceiling shown in the menu (%)
-    int clamp_volume = -1;    // headless: lower volume to this ceiling and exit
-    int clamp_brightness = -1;
+    int menu_bright = -1;  // brightness shown in the menu (%); -1 = read live
+    int set_brightness = -1; // headless: set brightness and exit
     int menu_autoresume = 0;  // auto-resume toggle state shown in the menu
     char pin_title[STR_MAX] = "";
     char select_rompath[STR_MAX] = ""; // open the carousel on this game
@@ -992,14 +950,10 @@ int main(int argc, char *argv[])
             menu_timer_minutes = atoi(argv[++i]);
         else if (strcmp(argv[i], "--remaining") == 0 && i + 1 < argc)
             menu_remaining = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--maxvol") == 0 && i + 1 < argc)
-            menu_maxvol = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--maxbright") == 0 && i + 1 < argc)
-            menu_maxbright = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--clamp-volume") == 0 && i + 1 < argc)
-            clamp_volume = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--clamp-brightness") == 0 && i + 1 < argc)
-            clamp_brightness = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--brightness") == 0 && i + 1 < argc)
+            menu_bright = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--set-brightness") == 0 && i + 1 < argc)
+            set_brightness = atoi(argv[++i]);
         else if (strcmp(argv[i], "--autoresume") == 0 && i + 1 < argc)
             menu_autoresume = atoi(argv[++i]) != 0;
         else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc)
@@ -1010,14 +964,10 @@ int main(int argc, char *argv[])
             strncpy(pin_title, argv[++i], STR_MAX - 1);
     }
 
-    // Headless enforcement modes: no UI, just clamp the live level and exit.
-    // Called on commit and by kid_mode_loop.sh's ticker every ~10s.
-    if (clamp_volume >= 0) {
-        clampVolume(clamp_volume);
-        return 0;
-    }
-    if (clamp_brightness >= 0) {
-        clampBrightness(clamp_brightness);
+    // Headless mode: no UI, just set the brightness and exit. Used when the
+    // parent commits the row and when a session starts.
+    if (set_brightness >= 0) {
+        applyBrightness(set_brightness);
         return 0;
     }
 
@@ -1049,15 +999,14 @@ int main(int argc, char *argv[])
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
 
-    // Clamp the ceilings passed in to whole 10% steps within range
-    if (menu_maxvol < 0)
-        menu_maxvol = 0;
-    if (menu_maxvol > 100)
-        menu_maxvol = 100;
-    if (menu_maxbright < BRIGHT_MIN_PCT)
-        menu_maxbright = BRIGHT_MIN_PCT;
-    if (menu_maxbright > 100)
-        menu_maxbright = 100;
+    // Open the row on the level the screen is actually at unless told
+    // otherwise, snapped to a whole 10% step
+    if (menu_bright < 0)
+        menu_bright = currentBrightnessPct();
+    if (menu_bright < BRIGHT_MIN_PCT)
+        menu_bright = BRIGHT_MIN_PCT;
+    if (menu_bright > 100)
+        menu_bright = 100;
 
     // Parent menu list (native Onion list component). Order must match the
     // MENU_* indices.
@@ -1074,18 +1023,12 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list, (ListItem){.label = "Turn off timer",
                                         .item_type = ACTION,
                                         .disabled = menu_remaining < 0});
-    list_addItem(&menu_list, (ListItem){.label = "Max volume",
-                                        .item_type = MULTIVALUE,
-                                        .value_min = 0,
-                                        .value_max = 100 / LEVEL_STEP,
-                                        .value = menu_maxvol / LEVEL_STEP,
-                                        .value_formatter = formatVolume});
     list_addItem(&menu_list,
-                 (ListItem){.label = "Max brightness",
+                 (ListItem){.label = "Brightness",
                             .item_type = MULTIVALUE,
                             .value_min = BRIGHT_MIN_PCT / LEVEL_STEP,
                             .value_max = 100 / LEVEL_STEP,
-                            .value = menu_maxbright / LEVEL_STEP,
+                            .value = menu_bright / LEVEL_STEP,
                             .value_formatter = formatBrightness});
     // Skip the carousel on boot and drop straight back into the last game
     // the kid played. Reported the instant it is flipped (writeAutoResume),
@@ -1231,17 +1174,12 @@ int main(int argc, char *argv[])
                     break;
                 }
                 case SW_BTN_B:
-                    if (picker_no_off) {
-                        // add-time flow: B cancels
-                        exit_code = 1;
-                        quit = true;
-                    }
-                    else {
-                        // arm flow: B = the default, no timer
-                        writeResult("TIMER", "0", NULL);
-                        exit_code = 5;
-                        quit = true;
-                    }
+                    // B backs out, both flows: cancels the add-time picker,
+                    // and cancels arming from the arm-time one. Playing with
+                    // no timer is LEFT to "OFF" then A, not a hidden meaning
+                    // for the back button.
+                    exit_code = 1;
+                    quit = true;
                     break;
                 default:
                     break;
@@ -1292,15 +1230,6 @@ int main(int argc, char *argv[])
                     }
                     else if (menu_list.active_pos == MENU_NOTIMER) {
                         writeResult("MENU", "NOTIMER", NULL);
-                        exit_code = 5;
-                        quit = true;
-                    }
-                    else if (menu_list.active_pos == MENU_VOLUME) {
-                        char pct[16];
-                        snprintf(pct, sizeof(pct), "%d",
-                                 menu_list.items[MENU_VOLUME].value *
-                                     LEVEL_STEP);
-                        writeResult("MENU", "VOLUME", pct);
                         exit_code = 5;
                         quit = true;
                     }
