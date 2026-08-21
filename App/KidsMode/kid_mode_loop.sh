@@ -106,18 +106,62 @@ make_salt() {
 config_cache=""
 config_cached=0
 
+# One key per line is exactly how jq writes this file, so the common case
+# parses in the shell with no process at all. Anything that doesn't parse
+# cleanly — a hand-edited file all on one line, an escaped quote, a value
+# shape we don't recognise — falls back to jq for the whole file. Getting
+# this wrong would read as "no PIN" and send a parent into the recovery
+# flow, so the parser refuses to guess.
 config_load() {
     [ "$config_cached" = "1" ] && return 0
-    if [ -f "$configfile" ]; then
-        # NB: select(.value != null), so a null key reads as absent — the
-        # old filter deliberately did not swallow boolean false, nor does
-        # this one.
+    config_cache=""
+    config_cached=1
+    [ -f "$configfile" ] || return 0
+
+    _cl_ok=1
+    while IFS= read -r _cl_line || [ -n "$_cl_line" ]; do
+        case "$_cl_line" in
+            *'"'*'"'*:*) ;;
+            *) continue ;; # braces, blank lines
+        esac
+
+        _cl_k="${_cl_line#*\"}"
+        _cl_k="${_cl_k%%\"*}"
+        [ -n "$_cl_k" ] || { _cl_ok=0; break; }
+
+        _cl_v="${_cl_line#*:}"
+        # trim whitespace, then the separating comma, then whitespace again
+        while :; do
+            case "$_cl_v" in
+                ' '* | '	'*) _cl_v="${_cl_v#?}" ;;
+                *' ' | *'	') _cl_v="${_cl_v%?}" ;;
+                *,) _cl_v="${_cl_v%,}" ;;
+                *) break ;;
+            esac
+        done
+
+        case "$_cl_v" in
+            null) continue ;;
+            '"'*'"')
+                _cl_v="${_cl_v#\"}"
+                _cl_v="${_cl_v%\"}"
+                # an embedded quote means escaping we are not parsing
+                case "$_cl_v" in *'"'*) _cl_ok=0 ;; esac
+                ;;
+            true | false) ;;
+            '' | *[!0-9]*) _cl_ok=0 ;; # not a bare number either
+        esac
+        [ "$_cl_ok" = "1" ] || break
+
+        config_cache="$config_cache$_cl_k	$_cl_v
+"
+    done < "$configfile"
+
+    if [ "$_cl_ok" != "1" ] || { [ -z "$config_cache" ] && [ -s "$configfile" ]; }; then
         config_cache="$(jq -r 'to_entries[] | select(.value != null)
             | "\(.key)	\(.value | tostring)"' "$configfile" 2> /dev/null)"
-    else
-        config_cache=""
+        log "config: kidmode.json needed jq to parse (unusual formatting)"
     fi
-    config_cached=1
     return 0
 }
 
@@ -627,14 +671,35 @@ apply_brightness() {
     return 0
 }
 
-state_day() { sed -n 1p "$timer_state" 2> /dev/null; }
+# Read all three lines in one go, in the shell. This is called from the
+# ticker every 10s and twice on the way to the launcher; three sed spawns
+# each time is a real cost on this hardware.
+state_read() {
+    st_day=""
+    st_used=0
+    st_bonus=0
+    [ -f "$timer_state" ] || return 0
+    {
+        IFS= read -r st_day || true
+        IFS= read -r st_used || true
+        IFS= read -r st_bonus || true
+    } < "$timer_state" 2> /dev/null
+    case "$st_used" in '' | *[!0-9]*) st_used=0 ;; esac
+    case "$st_bonus" in '' | *[!0-9]*) st_bonus=0 ;; esac
+    return 0
+}
+
+state_day() {
+    state_read
+    printf '%s\n' "$st_day"
+}
 state_used() {
-    v="$(sed -n 2p "$timer_state" 2> /dev/null)"
-    case "$v" in '' | *[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+    state_read
+    printf '%s\n' "$st_used"
 }
 state_bonus() {
-    v="$(sed -n 3p "$timer_state" 2> /dev/null)"
-    case "$v" in '' | *[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+    state_read
+    printf '%s\n' "$st_bonus"
 }
 
 state_write() { # $1 used, $2 bonus
@@ -798,7 +863,6 @@ stop_ticker() {
         kill "$(cat "$ticker_pid_file")" 2> /dev/null
         rm -f "$ticker_pid_file"
     fi
-    killall imgpop 2> /dev/null # remove any lingering chip overlay
     rm -f "$remaining_file"
 }
 
