@@ -949,6 +949,16 @@ static void flip(void)
 int main(int argc, char *argv[])
 {
     t_start = nowMs();
+    // Wall clock at main(), so the log can show how much of the gap is
+    // spent before this point — process spawn and dynamic linking of the
+    // SDL stack off the card, which the ms figures below can't see.
+    {
+        time_t t_wall = time(NULL);
+        struct tm *lt = localtime(&t_wall);
+        if (lt != NULL)
+            fprintf(stderr, "kidui: main at %02d:%02d:%02d\n", lt->tm_hour,
+                    lt->tm_min, lt->tm_sec);
+    }
     bool set_pin_mode = false;
     bool menu_mode = false;
     bool pick_timer_mode = false;

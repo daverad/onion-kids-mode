@@ -71,7 +71,7 @@ log() {
 # steps — it starts twice per arm, and that gap is otherwise invisible.
 log_ui_timings() {
     [ -f "$uilog" ] || return 0
-    grep "ms$" "$uilog" 2> /dev/null | grep "^kidui: " | while read -r _t; do
+    grep "^kidui: " "$uilog" 2> /dev/null | while read -r _t; do
         log "$_t"
     done
     return 0
@@ -97,12 +97,50 @@ make_salt() {
     fi
 }
 
+# jq is by far the most expensive thing this script runs: a big binary being
+# faulted in from a slow card, and every config_get used to spawn a fresh
+# one. The path from arming to the launcher made five or six of those calls,
+# which is most of the gap between "Kid Mode armed" and the carousel
+# appearing. Read the whole config in a single jq pass, then answer from a
+# cached copy with no subprocess at all; writes invalidate it.
+config_cache=""
+config_cached=0
+
+config_load() {
+    [ "$config_cached" = "1" ] && return 0
+    if [ -f "$configfile" ]; then
+        # NB: select(.value != null), so a null key reads as absent — the
+        # old filter deliberately did not swallow boolean false, nor does
+        # this one.
+        config_cache="$(jq -r 'to_entries[] | select(.value != null)
+            | "\(.key)	\(.value | tostring)"' "$configfile" 2> /dev/null)"
+    else
+        config_cache=""
+    fi
+    config_cached=1
+    return 0
+}
+
 config_get() {
     [ -f "$configfile" ] || return 1
-    # NB: not `.[$k] // empty` — that would swallow boolean false
-    jq -r --arg k "$1" \
-        'if has($k) and .[$k] != null then (.[$k] | tostring) else empty end' \
-        "$configfile" 2> /dev/null
+    config_load
+    _cg_ifs="$IFS"
+    IFS='
+'
+    set -f # values are hashes/numbers/booleans, but never glob against them
+    for _cg_line in $config_cache; do
+        case "$_cg_line" in
+            "$1	"*)
+                IFS="$_cg_ifs"
+                set +f
+                printf '%s\n' "${_cg_line#*	}"
+                return 0
+                ;;
+        esac
+    done
+    IFS="$_cg_ifs"
+    set +f
+    return 1
 }
 
 is_4_digits() {
@@ -120,6 +158,7 @@ ensure_config() {
             log "kidmode.json had invalid JSON; reset to defaults. Broken copy saved to $backupdir/kidmode.json.broken — check it for a missing/extra comma."
         fi
         printf '{\n    "pin_hash": "",\n    "pin_salt": "",\n    "pin_plain": ""\n}\n' > "$configfile"
+        config_cached=0
     fi
 }
 
@@ -128,6 +167,7 @@ config_merge() {
     ensure_config
     tmpcfg=/tmp/kidmode_config.$$
     jq "$@" "$configfile" > "$tmpcfg" && mv -f "$tmpcfg" "$configfile"
+    config_cached=0
     sync
 }
 
@@ -1011,6 +1051,7 @@ ensure_fav_shortcut() {
 # value starts a fresh budget for this session.
 
 pick_session_timer() {
+    log "launcher: starting kidui (timer picker)"
     rm -f "$uiresult"
     "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
@@ -1252,6 +1293,8 @@ cmd_run() {
         if ! has_pin; then
             no_pin_recovery=1
         fi
+
+        [ "$ui_timed" = "1" ] || log "launcher: starting kidui"
 
         rm -f "$uiresult"
         select_rompath=""
