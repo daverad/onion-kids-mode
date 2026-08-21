@@ -38,6 +38,9 @@ legacy_rabackup="$appdir/retroarch.cfg.kidmode-backup"
 keymapcfg=/mnt/SDCARD/.tmp_update/config/keymap.json
 keymapbackup="$backupdir/keymap.json.backup"
 keymapnone="$backupdir/keymap-was-absent"
+blfscript=/mnt/SDCARD/.tmp_update/script/blue_light.sh
+blfbackup="$backupdir/blue_light.sh.backup"
+last_game_file="$backupdir/last_game.txt"
 logfile=/mnt/SDCARD/.tmp_update/logs/kidmode.log
 
 timer_state="$backupdir/timer_state.txt" # 3 lines: day / used seconds / bonus seconds
@@ -51,6 +54,7 @@ ticker_pid_file=/tmp/kidmode_ticker.pid
 # kidui reports results via this file, NOT stdout — the device's SDL/driver
 # stack prints noise on stdout, which broke first-line parsing on hardware.
 uiresult=/tmp/kidmode_ui_result
+autoresume_result=/tmp/kidmode_autoresume_result
 uilog=/tmp/kidmode_ui_log
 
 export LD_LIBRARY_PATH="/lib:/config/lib:$miyoodir/lib:$sysdir/lib:$sysdir/lib/parasyte"
@@ -98,6 +102,11 @@ is_4_digits() {
 
 ensure_config() {
     if [ ! -f "$configfile" ] || ! jq -e . "$configfile" > /dev/null 2>&1; then
+        if [ -f "$configfile" ]; then
+            mkdir -p "$backupdir"
+            cp "$configfile" "$backupdir/kidmode.json.broken" 2> /dev/null
+            log "kidmode.json had invalid JSON; reset to defaults. Broken copy saved to $backupdir/kidmode.json.broken — check it for a missing/extra comma."
+        fi
         printf '{\n    "pin_hash": "",\n    "pin_salt": "",\n    "pin_plain": ""\n}\n' > "$configfile"
     fi
 }
@@ -241,37 +250,6 @@ ensure_pin() {
 # them; set "lock_retroarch_hotkeys": false in kidmode.json to keep stock
 # RetroArch shortcuts while armed.
 
-ra_set() {
-    if grep -q "^[[:space:]]*$1[[:space:]]*=" "$racfg" 2> /dev/null; then
-        sed -i "s|^[[:space:]]*$1[[:space:]]*=.*|$1 = \"$2\"|" "$racfg"
-    else
-        printf '%s = "%s"\n' "$1" "$2" >> "$racfg"
-    fi
-}
-
-# Unbind the in-game shortcuts a kid can trip. Every one of these is a
-# hotkey binding in retroarch.cfg, so the whole lot comes back from
-# retroarch.cfg.backup on unlock. input_exit_emulator is deliberately left
-# alone — Onion's own exit/save paths lean on it.
-lock_ra_hotkeys() {
-    # Every documented way into the menu: the pad combo (this is the
-    # MENU+SELECT one), a direct button bind, and the keyboard bind
-    ra_set input_menu_toggle_gamepad_combo 0
-    ra_set input_menu_toggle_btn nul
-    ra_set input_menu_toggle nul
-
-    # Save states, rewind, fast-forward, screenshots, cheats, shaders and
-    # disc swapping: nothing a kid needs, plenty they can break
-    for hk in load_state save_state state_slot_increase state_slot_decrease \
-        rewind hold_fast_forward toggle_fast_forward toggle_slowmotion \
-        hold_slowmotion screenshot reset cheat_index_plus cheat_index_minus \
-        cheat_toggle shader_next shader_prev disk_eject_toggle disk_next \
-        disk_prev grab_mouse_toggle game_focus_toggle; do
-        ra_set "input_${hk}" nul
-        ra_set "input_${hk}_btn" nul
-    done
-}
-
 apply_ra_lock() {
     [ -f "$racfg" ] || return 0
     mkdir -p "$backupdir"
@@ -279,24 +257,112 @@ apply_ra_lock() {
         cp "$racfg" "$rabackup"
     fi
 
-    ra_set kiosk_mode_enable true
+    # Every setting below used to go through ra_set (one grep + one sed —
+    # a full read+rewrite of retroarch.cfg — per call). With ~70 settings
+    # that was up to 140 full passes over the file, adding a multi-second
+    # stall between confirming the timer and reaching the carousel. This
+    # applies all of them in a single awk pass instead: one read, one
+    # write, regardless of how many settings there are.
+    #
+    #   kiosk_mode_enable true — locks down the in-game quick menu
+    #   video_font_enable true — timer countdown arrives via RA's OSD
+    #     (SHOW_MSG), so on-screen notifications must stay on
+    #   quick_menu_show_* false — hide options/cheats/shaders/record/stream
+    #     from the (already locked-down) quick menu
+    #   settings_show_* false — hide every settings category
+    #   input_*_btn nul — every documented RetroArch hotkey action,
+    #     disabled. MENU is input_enable_hotkey_btn, held with another
+    #     button: this covers MENU+SELECT (open RA's menu), MENU+L2/R2
+    #     (save/load state), MENU+L/R (rewind/fast-forward), MENU+LEFT/
+    #     RIGHT (save-slot change), MENU+START (fullscreen), and every
+    #     other hotkey RetroArch documents — even ones not expected by
+    #     default, so nothing is left reachable via MENU+<button>. The
+    #     individual actions are cleared rather than input_enable_hotkey_btn
+    #     itself, because unbinding the enable button would make each of
+    #     these fire on a single un-combo'd press instead. MENU+VOLUME for
+    #     brightness is handled outside RetroArch (by the system's button
+    #     daemon) and is unaffected by any of this.
+    ra_keys="kiosk_mode_enable video_font_enable quick_menu_show_options
+        quick_menu_show_cheats quick_menu_show_shaders
+        quick_menu_show_start_recording quick_menu_show_start_streaming
+        settings_show_configuration settings_show_core
+        settings_show_directory settings_show_drivers
+        settings_show_file_browser settings_show_input
+        settings_show_latency settings_show_network settings_show_recording
+        settings_show_user settings_show_user_interface settings_show_video
+        settings_show_audio"
+
+    # The in-game hotkeys are the half a parent may want to keep: set
+    # "lock_retroarch_hotkeys": false in kidmode.json to leave RetroArch's
+    # own shortcuts alone (the kiosk settings above always apply).
+    ra_hotkeys="input_menu_toggle_btn input_save_state_btn
+        input_load_state_btn input_rewind_btn input_toggle_fast_forward_btn
+        input_hold_fast_forward_btn input_state_slot_increase_btn
+        input_state_slot_decrease_btn input_toggle_fullscreen_btn
+        input_shader_toggle_btn input_shader_next_btn input_shader_prev_btn
+        input_reset_btn input_screenshot_btn input_pause_toggle_btn
+        input_frame_advance_btn input_cheat_toggle_btn
+        input_movie_record_toggle_btn input_recording_toggle_btn
+        input_streaming_toggle_btn input_netplay_game_watch_btn
+        input_ai_service_btn input_audio_mute_btn
+        input_cheat_index_minus_btn input_cheat_index_plus_btn
+        input_close_content_btn input_desktop_menu_toggle_btn
+        input_disk_eject_toggle_btn input_disk_next_btn input_disk_prev_btn
+        input_exit_emulator_btn input_fps_toggle_btn
+        input_game_focus_toggle_btn input_grab_mouse_toggle_btn
+        input_hold_slowmotion_btn input_osk_toggle_btn
+        input_overlay_next_btn input_preempt_toggle_btn
+        input_runahead_toggle_btn input_send_debug_info_btn
+        input_toggle_slowmotion_btn input_toggle_statistics_btn
+        input_toggle_vrr_runloop_btn input_volume_up_btn
+        input_volume_down_btn input_netplay_fade_chat_toggle_btn
+        input_netplay_host_toggle_btn input_netplay_ping_toggle_btn
+        input_netplay_player_chat_btn"
+
     if [ "$(config_get lock_retroarch_hotkeys)" != "false" ]; then
-        lock_ra_hotkeys
+        ra_keys="$ra_keys $ra_hotkeys"
     fi
-    # Timer countdown arrives via RetroArch's OSD (SHOW_MSG); make sure
-    # on-screen notifications are enabled while armed
-    ra_set video_font_enable true
-    ra_set quick_menu_show_options false
-    ra_set quick_menu_show_cheats false
-    ra_set quick_menu_show_shaders false
-    ra_set quick_menu_show_start_recording false
-    ra_set quick_menu_show_start_streaming false
-    for section in configuration core directory drivers file_browser input \
-        latency network recording user user_interface video audio; do
-        ra_set "settings_show_$section" false
-    done
+
+    tmpra=/tmp/kidmode_ra.$$
+    awkprog=/tmp/kidmode_ra_awk.$$
+    {
+        echo 'BEGIN {'
+        i=0
+        for k in $ra_keys; do
+            i=$((i + 1))
+            case "$k" in
+                kiosk_mode_enable | video_font_enable) v=true ;;
+                quick_menu_show_* | settings_show_*) v=false ;;
+                *) v=nul ;;
+            esac
+            printf '  key[%d]="%s"; val[%d]="%s";\n' "$i" "$k" "$i" "$v"
+        done
+        echo "  n=$i"
+        echo '}'
+        cat << 'AWKEOF'
+{
+    matched = 0
+    for (i = 1; i <= n; i++) {
+        if (!done[i] && $0 ~ ("^[ \t]*" key[i] "[ \t]*=")) {
+            print key[i] " = \"" val[i] "\""
+            done[i] = 1
+            matched = 1
+            break
+        }
+    }
+    if (!matched) print $0
+}
+END {
+    for (i = 1; i <= n; i++)
+        if (!done[i]) print key[i] " = \"" val[i] "\""
+}
+AWKEOF
+    } > "$awkprog"
+
+    awk -f "$awkprog" "$racfg" > "$tmpra" && mv -f "$tmpra" "$racfg"
+    rm -f "$awkprog"
     sync
-    log "RetroArch kiosk lock applied."
+    log "RetroArch kiosk lock applied (in-game hotkeys disabled), single pass."
 }
 
 restore_ra_lock() {
@@ -311,6 +377,105 @@ restore_ra_lock() {
         sync
         log "RetroArch config restored (legacy backup)."
     fi
+}
+
+# ------------------------ Blue-light-filter lock ----------------------------
+# MENU+B is a system-level shortcut (handled by keymon, outside RetroArch)
+# that toggles the blue-light filter by calling this script with "enable" or
+# "disable". While armed, we prepend a guard that makes those two calls a
+# no-op, so the manual toggle does nothing. The scheduled auto on/off (if the
+# person has that feature configured) is untouched, since it calls the
+# enable/disable shell functions directly rather than going through this
+# case dispatch. Original script restored byte-for-byte on unlock.
+
+apply_blf_lock() {
+    [ -f "$blfscript" ] || return 0
+    mkdir -p "$backupdir"
+    if ! grep -q "KIDMODE_BLF_GUARD" "$blfscript" 2> /dev/null; then
+        [ -f "$blfbackup" ] || cp "$blfscript" "$blfbackup"
+        tmpblf=/tmp/kidmode_blf.$$
+        {
+            printf '%s\n' "# KIDMODE_BLF_GUARD: while Kids Mode is armed, ignore the manual"
+            printf '%s\n' "# MENU+B toggle (this script called with enable/disable) so a kid"
+            printf '%s\n' "# can't turn the blue-light filter on/off mid-game."
+            printf '%s\n' 'if [ -f /mnt/SDCARD/.kidmode ] && { [ "$1" = "enable" ] || [ "$1" = "disable" ]; }; then'
+            printf '%s\n' '    exit 0'
+            printf '%s\n' 'fi'
+            cat "$blfscript"
+        } > "$tmpblf"
+        mv -f "$tmpblf" "$blfscript"
+        chmod +x "$blfscript" 2> /dev/null
+        sync
+        log "MENU+B blue-light toggle disabled while armed."
+    fi
+}
+
+restore_blf_lock() {
+    if [ -f "$blfbackup" ]; then
+        cp "$blfbackup" "$blfscript"
+        rm -f "$blfbackup"
+        chmod +x "$blfscript" 2> /dev/null
+        sync
+        log "blue_light.sh restored."
+    fi
+}
+
+# ------------------------------ save profile --------------------------------
+# Saves/CurrentProfile holds several DIFFERENT kinds of data mixed together:
+# actual save files/save-states and GameSwitcher's thumbnail cache (personal,
+# tied to who's playing) alongside config/ — RetroArch's per-core settings
+# like aspect ratio, scanlines/shaders, CPU clock — and theme/, which are
+# device-wide preferences, not personal data, and should stay exactly the
+# same no matter who's playing.
+#
+# Onion's own Guest Mode swaps the WHOLE folder (MainProfile <->
+# GuestProfile) since a guest is meant to get a fully separate setup. Kids
+# Mode only wants the personal parts isolated — so we swap just the
+# saves/states/romScreens subfolders individually, leaving config/, theme/,
+# and lists/ untouched and shared throughout.
+#
+# The kid's own save progress should persist across sessions — so instead of
+# a throwaway park each time, Kids Mode keeps its own permanent
+# Saves/KidsProfile (holding just these three subfolders) that's swapped in
+# at arm time and swapped back out (keeping whatever was added) at disarm,
+# while whatever was there before (from Main or Guest — we don't need to
+# know which) is parked untouched in between. A plain directory rename
+# can't partially fail or leave mismatched data the way editing files in
+# place could.
+current_profile=/mnt/SDCARD/Saves/CurrentProfile
+kids_profile=/mnt/SDCARD/Saves/KidsProfile
+isolated_subdirs="saves states romScreens"
+
+apply_profile_isolation() {
+    mkdir -p "$kids_profile" "$current_profile" "$backupdir"
+    for d in $isolated_subdirs; do
+        rm -rf "$backupdir/profile-parked-$d"
+        if [ -d "$current_profile/$d" ]; then
+            mv "$current_profile/$d" "$backupdir/profile-parked-$d"
+        fi
+        if [ -d "$kids_profile/$d" ]; then
+            mv "$kids_profile/$d" "$current_profile/$d"
+        else
+            mkdir -p "$current_profile/$d"
+        fi
+    done
+    sync
+    log "Switched to the kid's own saves/states/thumbnails for this session."
+}
+
+restore_profile_isolation() {
+    mkdir -p "$kids_profile"
+    for d in $isolated_subdirs; do
+        rm -rf "$kids_profile/$d"
+        if [ -d "$current_profile/$d" ]; then
+            mv "$current_profile/$d" "$kids_profile/$d" # keep kid's progress for next time
+        fi
+        if [ -d "$backupdir/profile-parked-$d" ]; then
+            mv "$backupdir/profile-parked-$d" "$current_profile/$d"
+        fi
+    done
+    sync
+    log "Restored the previous saves/states/thumbnails."
 }
 
 # ------------------------- MENU button override ----------------------------
@@ -478,7 +643,7 @@ notify_game() {
 }
 
 # RA's OSD messages last ~3 s; re-pushing the same text every ~2 s makes it
-# render as one continuous message. Covers one 10 s ticker interval.
+# render as one continuous message.
 pin_message() {
     (
         for _i in 1 2 3 4 5; do
@@ -839,8 +1004,9 @@ ensure_fav_shortcut() {
 }
 
 # --------------------------- session timer picker --------------------------
-# Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 50 minutes
-# (default OFF). Selecting a value starts a fresh budget for this session.
+# Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 120 minutes
+# (default OFF; must match TIMER_MAX in src/kidsMode/kidui.c). Selecting a
+# value starts a fresh budget for this session.
 
 pick_session_timer() {
     rm -f "$uiresult"
@@ -882,18 +1048,41 @@ change_pin() {
 
 # ------------------------------ parent menu --------------------------------
 # Shown after a correct PIN: exit Kids Mode, add/turn off play time, set the
-# max volume/brightness ceilings, or change the PIN. Value rows report the
-# chosen value on line 3 of the result. Returns 0 = unlock requested,
+# max volume/brightness ceilings, flip auto-resume, or change the PIN. Value
+# rows report the chosen value on line 3 of the result; the auto-resume
+# toggle is reported separately (see below). Returns 0 = unlock requested,
 # 1 = stay in Kid Mode.
 
 parent_menu() {
     while :; do
-        rm -f "$uiresult"
+        rm -f "$uiresult" "$autoresume_result"
+        ar_val=0
+        [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
         "$kidui_bin" --parent-menu \
             --remaining "$(timer_remaining)" \
             --maxvol "$(get_max_volume_pct)" \
-            --maxbright "$(get_max_brightness_pct)" > "$uilog" 2>&1
+            --maxbright "$(get_max_brightness_pct)" \
+            --autoresume "$ar_val" > "$uilog" 2>&1
         menu_rc=$?
+
+        # The toggle is written the instant the parent flips it (not
+        # deferred to some specific exit action), so sync it into
+        # kidmode.json regardless of how the menu was left — Back, B, or
+        # any other action below.
+        if [ -f "$autoresume_result" ]; then
+            new_ar_val="$(sed -n 1p "$autoresume_result")"
+            rm -f "$autoresume_result"
+            case "$new_ar_val" in
+                1)
+                    config_merge '.auto_resume_last_game = true'
+                    log "Auto-resume last game turned ON from the parent menu."
+                    ;;
+                0)
+                    config_merge '.auto_resume_last_game = false'
+                    log "Auto-resume last game turned OFF from the parent menu."
+                    ;;
+            esac
+        fi
 
         if [ "$menu_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "MENU" ]; then
             rm -f "$uiresult"
@@ -985,6 +1174,8 @@ disarm() {
     rm -f "$flagfile"
     stop_ticker
     restore_ra_lock
+    restore_blf_lock
+    restore_profile_isolation
     restore_keymap_override
     ensure_fav_shortcut
     rm -f "$sysdir/cmd_to_run.sh" "$uiresult"
@@ -1033,6 +1224,21 @@ cmd_run() {
             log "resuming interrupted game"
             run_game_cmd
         fi
+    elif [ "$(config_get auto_resume_last_game)" = "true" ] &&
+        [ -f "$last_game_file" ] && [ "$(timer_remaining)" != "0" ]; then
+        # Opt in with "auto_resume_last_game": true in kidmode.json: skip
+        # the carousel on boot and go straight back into the last game the
+        # child played, like stock Onion's own auto-resume.
+        lg_launch="$(sed -n 1p "$last_game_file")"
+        lg_rompath="$(sed -n 2p "$last_game_file")"
+        if [ -n "$lg_launch" ] && [ -f "$lg_launch" ] && [ -f "$lg_rompath" ]; then
+            log "auto-resuming last game: $lg_rompath"
+            build_game_cmd "$lg_launch" "$lg_rompath"
+            run_game_cmd
+        else
+            log "auto_resume_last_game set but last game no longer exists; showing carousel."
+            rm -f "$last_game_file"
+        fi
     fi
 
     while [ -f "$flagfile" ]; do
@@ -1051,6 +1257,8 @@ cmd_run() {
         fi
 
         rm -f "$uiresult"
+        select_rompath=""
+        [ -f "$last_game_file" ] && select_rompath="$(sed -n 2p "$last_game_file")"
         if [ "$no_pin_recovery" = "1" ] && [ -n "$pin_notice" ]; then
             "$kidui_bin" -t "Set a new PIN" --start-pin --notice "$pin_notice" > "$uilog" 2>&1
         elif [ "$no_pin_recovery" = "1" ]; then
@@ -1059,6 +1267,8 @@ cmd_run() {
             # Wrong PIN last time: reopen straight on the PIN screen so the
             # parent can try again in place
             "$kidui_bin" --start-pin --notice "$pin_notice" > "$uilog" 2>&1
+        elif [ -n "$select_rompath" ]; then
+            "$kidui_bin" --select "$select_rompath" > "$uilog" 2>&1
         else
             "$kidui_bin" > "$uilog" 2>&1
         fi
@@ -1086,6 +1296,11 @@ cmd_run() {
                 else
                     build_game_cmd "$sel_launch" "$sel_rompath"
                 fi
+                # Remember this as "the last game" (plain resume form, not
+                # the fresh-start variant) so a future boot can auto-resume
+                # it if auto_resume_last_game is enabled.
+                mkdir -p "$backupdir"
+                printf '%s\n%s\n' "$sel_launch" "$sel_rompath" > "$last_game_file"
                 run_game_cmd
                 ui_fails=0
                 ;;
@@ -1151,6 +1366,8 @@ cmd_run() {
     # Flag removed externally (e.g. deleted from a computer) — clean up
     stop_ticker
     restore_ra_lock
+    restore_blf_lock
+    restore_profile_isolation
     restore_keymap_override
     rm -f "$sysdir/cmd_to_run.sh"
     bootScreen clear 2> /dev/null
@@ -1183,6 +1400,8 @@ cmd_arm() {
     pick_session_timer
 
     apply_ra_lock
+    apply_blf_lock
+    apply_profile_isolation
     apply_keymap_override
     ensure_fav_shortcut
     touch "$flagfile"
