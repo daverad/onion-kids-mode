@@ -23,23 +23,34 @@ and an optional play timer.
   play time right on the menu row — **◀ ▶** picks +5…+120 min,
   **A**/**START** applies, and the header previews the remaining time before
   and after — **turn the timer off entirely**, cap the **max volume**
-  (Mute–100%) and **max brightness** (10–100%) the kid can reach, or
-  **change the PIN** — all without leaving the launcher.
+  (Mute–100%) and **max brightness** (10–100%) the kid can reach, flip
+  **auto-resume**, or **change the PIN** — all without leaving the launcher.
 - **Start over**: **X** on a game asks "Start over?" and launches from the
   beginning without touching in-game saves.
 - **MENU button in-game saves and exits** back to the carousel.
 - **RetroArch is locked down while armed**: settings are hidden (kiosk
-  mode) *and* the in-game shortcuts are unbound — the menu combo
-  (MENU+SELECT), save/load state, state slots, rewind, fast-forward,
-  screenshots, cheats and shader cycling all do nothing until you unlock.
-  Everything is restored from a backup on unlock.
+  mode) *and* every documented in-game hotkey is unbound — MENU+SELECT
+  (RetroArch's menu), MENU+L2/R2 (save/load state), MENU+L/R (rewind and
+  fast-forward), MENU+←/→ (save slots), plus screenshots, cheats, shaders,
+  disc swap and the rest. MENU+VOLUME for brightness is handled outside
+  RetroArch and still works. Everything is restored from a backup on
+  unlock.
+- **The kid gets their own saves**: while armed, `Saves/CurrentProfile`'s
+  `saves`, `states` and `romScreens` are swapped for a persistent
+  `Saves/KidsProfile`, so a child can't overwrite your save states or fill
+  the game switcher with their thumbnails — and their own progress is
+  still there next session. Per-core settings and themes stay shared.
+- **MENU+B blue-light toggle is disabled** while armed (any schedule you
+  have configured still runs).
+- **Auto-resume** (optional): boot straight back into the last game the
+  kid played instead of the carousel. Toggle it in the parent menu.
 - Survives reboots; a powered-off-mid-game session resumes on next boot.
 
 ## Screenshots
 
 | ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
 | :--: | :--: | :--: |
-| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list: add/turn off play time, cap max volume & brightness, or change the PIN* | *The PIN gate — set once when arming; **A** confirms* |
+| *The kid's carousel — one favorite at a time, box art and all; **A** plays* | *Parent menu — a native Onion list: play time, volume/brightness caps, auto-resume and change PIN (shot before the auto-resume row; due a re-shoot)* | *The PIN gate — set once when arming; **A** confirms* |
 
 *(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
 your device uses.)*
@@ -80,7 +91,7 @@ welcome.
 
 4. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
    *Exit Kids Mode / Add play time / Turn off timer / Max volume /
-   Max brightness / Change PIN / Back*.
+   Max brightness / Auto-resume last game / Change PIN / Back*.
    - **Add play time:** **◀ ▶** picks the amount (the header shows what the
      remaining time becomes), **A**/**START** applies — you drop straight
      back into the kid launcher.
@@ -91,6 +102,10 @@ welcome.
      it. *Soft cap:* the physical volume/brightness buttons are handled by
      Onion's `keymon`, so a kid can briefly nudge past the ceiling — Kids
      Mode pulls it back within ~10 seconds. Set to **100%** to remove a cap.
+   - **Auto-resume last game:** **◀ ▶** flips it On/Off. On means the next
+     boot goes straight into the last game the kid played instead of the
+     carousel (it falls back to the carousel if that game is gone). The
+     flip is saved the moment you make it, so **B** or *Back* both keep it.
    - **Change PIN:** set a new 4-digit PIN on the spot (no computer needed).
 5. **Time's up:** the kid sees a friendly "Time's up!" screen. If the
    device is left on there, it powers off by itself after 5 minutes.
@@ -105,7 +120,10 @@ resetting it):
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `lock_retroarch_hotkeys` | `true` | Unbinds RetroArch's in-game shortcuts while armed (menu combo, save/load state, slots, rewind, fast-forward, screenshot, cheats, shaders, disc swap). Set to `false` to keep stock RetroArch shortcuts. |
+| `lock_retroarch_hotkeys` | `true` | Unbinds every documented RetroArch in-game hotkey while armed. Set to `false` to keep stock RetroArch shortcuts — the kiosk settings (hidden menus) still apply either way. |
+| `auto_resume_last_game` | `false` | Boot straight into the kid's last game instead of the carousel. Also on the parent menu, which is the easier place to change it. |
+| `max_volume_pct` | `100` | Volume ceiling. Normally set from the parent menu. |
+| `max_brightness_pct` | `100` | Brightness ceiling (floor 10%). Normally set from the parent menu. |
 | `fav_shortcut` | `false` | Adds a **Kids Mode** entry to Onion's Favorites tab so arming doesn't need the Apps tab. Off by default because it can clutter MainUI's search results. |
 
 Changes take effect the next time you arm Kids Mode. Note that updating the
@@ -129,9 +147,13 @@ while armed, and games are launched directly from the carousel with no
 netplay options. Unlock with the PIN to use netplay.
 
 **Can my kid still open the RetroArch menu?** Not with the default
-settings — the menu combo (MENU+SELECT) and the other in-game hotkeys are
-unbound while armed and restored on unlock. If you *want* them back, set
-`lock_retroarch_hotkeys` to `false`.
+settings — the menu combo (MENU+SELECT) and every other documented hotkey
+are unbound while armed and restored on unlock. If you *want* them back,
+set `lock_retroarch_hotkeys` to `false`.
+
+**Where did my save states go?** Nowhere — while armed, the kid plays on
+their own `Saves/KidsProfile` and yours are parked; exiting Kids Mode puts
+yours straight back. Both sides keep their progress.
 
 ## PIN reset / recovery
 
@@ -153,8 +175,17 @@ or renamed:
 - **RetroArch settings stuck hidden or shortcuts still unbound:** copy
   `Saves/kidmode/retroarch.cfg.backup` over
   `RetroArch/.retroarch/retroarch.cfg`.
+- **Blue-light toggle still dead:** copy `Saves/kidmode/blue_light.sh.backup`
+  over `.tmp_update/script/blue_light.sh` (or delete the guard block at the
+  top of that file, marked `KIDMODE_BLF_GUARD`).
+- **Saves look wrong after a crash mid-session:** the kid's are in
+  `Saves/KidsProfile/`, yours are parked in `Saves/kidmode/profile-parked-*`.
+  Move the parked folders back into `Saves/CurrentProfile/` to undo the swap
+  by hand.
 - **Uninstall:** delete `/App/KidsMode/`, `/.kidmode` (if present),
-  `/.tmp_update/startup/kidmode_boot.sh` and `/Saves/kidmode/`.
+  `/.tmp_update/startup/kidmode_boot.sh`, `/Saves/kidmode/` and
+  `/Saves/KidsProfile/` (that last one is the kid's save data — keep it if
+  you might re-arm later).
 
 Fail-safes: if the launcher binary is missing or crashes repeatedly, Kids
 Mode disarms itself and boots normal Onion instead of brick-looping. A log
@@ -168,10 +199,11 @@ checks for the `/.kidmode` flag file: when present, it blocks in the kid
 launcher loop, so Onion's MainUI simply never starts until a PIN unlock
 removes the flag. Games are launched with the exact command format Onion
 itself uses (per-game core overrides, play-activity tracking, V4 560p
-handling, auto-save/resume all preserved). No Onion binaries or scripts
-are modified; the two config files it adjusts while armed
-(`retroarch.cfg` kiosk lock, MENU-button keymap) are backed up to
-`Saves/kidmode/` and restored on unlock.
+handling, auto-save/resume all preserved). No Onion binaries are modified;
+everything it touches while armed — `retroarch.cfg` (kiosk lock and
+hotkeys), `keymap.json` (MENU button), `blue_light.sh` (MENU+B guard) and
+the personal half of `Saves/CurrentProfile` — is backed up to
+`Saves/kidmode/` and put back on unlock.
 
 A determined child can still force a shutdown with a long power press —
 the device just boots back into Kids Mode. Hardening that path would
@@ -196,4 +228,8 @@ an install zip to tagged releases.
 Built on and for [Onion OS](https://github.com/OnionUI/Onion) and its
 common UI infrastructure. The RetroArch kiosk-lock approach was inspired
 by [OnionUI/Onion#1910](https://github.com/OnionUI/Onion/pull/1910).
+The in-game hotkey lockout, the MENU+B blue-light guard, per-kid save
+isolation and auto-resume come from [@Veuks](https://github.com/Veuks),
+forwarded by [@andygeorge](https://github.com/andygeorge) in
+[#5](https://github.com/daverad/onion-kids-mode/pull/5).
 GPL-3.0, same as Onion.
