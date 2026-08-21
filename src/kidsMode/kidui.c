@@ -18,8 +18,15 @@
 //            "MENU" \n "ADDTIME" \n <minutes>   (inline add-time selector)
 //            "MENU" \n "NOTIMER"                (turn the play timer off)
 //            "TIMER" \n <minutes>               (--pick-timer mode)
+//            "MENU" \n "VOLUME" \n <percent>     (max-volume selector)
+//            "MENU" \n "BRIGHTNESS" \n <percent> (max-brightness selector)
+//            "MENU" \n "CHANGEPIN"               (set a new PIN)
 //   exit 7:  "POWEROFF"  (Time's up screen sat idle for 5 minutes)
 //   exit 1:  canceled / error / nothing selected (result file removed)
+//
+// The auto-resume toggle is reported out-of-band in
+// /tmp/kidmode_autoresume_result ("1" or "0"), written the moment it is
+// flipped so it survives leaving the menu with B or Back.
 //
 // PIN screens: UP/DOWN changes the digit, LEFT/RIGHT moves, A confirms
 // (START is a silent alias). --notice "..." shows a short message under the
@@ -28,11 +35,13 @@
 // failed attempt can retry in place instead of bouncing to the kid screen.
 //
 // Modes:
-//   kidui [--start-pin] [-t "..."] [--notice "..."]
-//                                  carousel (default)
+//   kidui [--start-pin] [--select <rom path>] [-t "..."] [--notice "..."]
+//                                  carousel (default); --select opens on
+//                                  that rom instead of the first favorite
 //   kidui --set-pin -t "..." [--notice "..."]
 //                                  PIN entry only (for initial PIN setup)
-//   kidui --parent-menu --remaining S
+//   kidui --parent-menu --remaining S [--maxvol P] [--maxbright P]
+//         [--autoresume 0|1]
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
@@ -86,6 +95,10 @@
 #define TIMESUP_OFF_MS (5 * 60 * 1000)
 #define REMAINING_FILE "/tmp/kidmode_remaining"
 #define RESULT_FILE "/tmp/kidmode_ui_result"
+// The auto-resume toggle is reported on its own, the moment it is flipped —
+// kid_mode_loop.sh reads this file however the menu is left (a menu action,
+// Back, or B), so the setting can't be lost by exiting the "wrong" way.
+#define AUTORESUME_FILE "/tmp/kidmode_autoresume_result"
 
 typedef enum { SCREEN_CAROUSEL,
                SCREEN_PIN,
@@ -100,9 +113,10 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_NOTIMER 2
 #define MENU_VOLUME 3
 #define MENU_BRIGHTNESS 4
-#define MENU_CHANGEPIN 5
-#define MENU_BACK 6
-#define MENU_ROWS 7
+#define MENU_AUTORESUME 5
+#define MENU_CHANGEPIN 6
+#define MENU_BACK 7
+#define MENU_ROWS 8
 #define TIMER_STEP 5
 #define TIMER_MAX 120
 // Volume/brightness ceilings are picked in 10% steps. Brightness never goes
@@ -631,6 +645,23 @@ static void formatBrightness(void *self, char *out_label)
         sprintf(out_label, "%d%%", item->value * LEVEL_STEP);
 }
 
+static void formatOnOff(void *self, char *out_label)
+{
+    ListItem *item = (ListItem *)self;
+    strcpy(out_label, item->value ? "On" : "Off");
+}
+
+// Publish the auto-resume choice for kid_mode_loop.sh. Written on every
+// flip rather than on a menu action, so B / Back keep the new value.
+static void writeAutoResume(int on)
+{
+    FILE *fp = fopen(AUTORESUME_FILE, "w");
+    if (fp == NULL)
+        return;
+    fprintf(fp, "%d\n", on ? 1 : 0);
+    fclose(fp);
+}
+
 // The parent menu is a real Onion list: full-width rows, the theme's list
 // font and selection background, and an Apps-menu-style value selector on
 // the "Add play time" row.
@@ -805,7 +836,9 @@ int main(int argc, char *argv[])
     int menu_maxbright = 100; // brightness ceiling shown in the menu (%)
     int clamp_volume = -1;    // headless: lower volume to this ceiling and exit
     int clamp_brightness = -1;
+    int menu_autoresume = 0;  // auto-resume toggle state shown in the menu
     char pin_title[STR_MAX] = "";
+    char select_rompath[STR_MAX] = ""; // open the carousel on this game
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--set-pin") == 0)
@@ -832,6 +865,10 @@ int main(int argc, char *argv[])
             clamp_volume = atoi(argv[++i]);
         else if (strcmp(argv[i], "--clamp-brightness") == 0 && i + 1 < argc)
             clamp_brightness = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--autoresume") == 0 && i + 1 < argc)
+            menu_autoresume = atoi(argv[++i]) != 0;
+        else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc)
+            strncpy(select_rompath, argv[++i], STR_MAX - 1);
         else if ((strcmp(argv[i], "-t") == 0 ||
                   strcmp(argv[i], "--title") == 0) &&
                  i + 1 < argc)
@@ -915,6 +952,15 @@ int main(int argc, char *argv[])
                             .value_max = 100 / LEVEL_STEP,
                             .value = menu_maxbright / LEVEL_STEP,
                             .value_formatter = formatBrightness});
+    // Skip the carousel on boot and drop straight back into the last game
+    // the kid played. Reported the instant it is flipped (writeAutoResume),
+    // not on a menu action.
+    list_addItem(&menu_list, (ListItem){.label = "Auto-resume last game",
+                                        .item_type = MULTIVALUE,
+                                        .value_min = 0,
+                                        .value_max = 1,
+                                        .value = menu_autoresume,
+                                        .value_formatter = formatOnOff});
     list_addItem(&menu_list,
                  (ListItem){.label = "Change PIN", .item_type = ACTION});
     list_addItem(&menu_list,
@@ -936,6 +982,16 @@ int main(int argc, char *argv[])
     else {
         loadFavorites();
         fprintf(stderr, "kidui: loaded %d favorites\n", games_count);
+        // --select: open on the game the kid played last, so returning from
+        // a game doesn't dump them back at the start of the carousel
+        if (strlen(select_rompath) > 0) {
+            for (int i = 0; i < games_count; i++) {
+                if (strcmp(games[i].rompath, select_rompath) == 0) {
+                    current = i;
+                    break;
+                }
+            }
+        }
         remaining = readRemaining();
         if (remaining == 0)
             active_screen = SCREEN_TIMESUP;
@@ -1067,12 +1123,20 @@ int main(int argc, char *argv[])
                     break;
                 case SW_BTN_LEFT:
                     // Value selector on the add-time row (Apps-menu style)
-                    if (list_keyLeft(&menu_list, false))
+                    if (list_keyLeft(&menu_list, false)) {
+                        if (menu_list.active_pos == MENU_AUTORESUME)
+                            writeAutoResume(
+                                menu_list.items[MENU_AUTORESUME].value);
                         dirty = true;
+                    }
                     break;
                 case SW_BTN_RIGHT:
-                    if (list_keyRight(&menu_list, false))
+                    if (list_keyRight(&menu_list, false)) {
+                        if (menu_list.active_pos == MENU_AUTORESUME)
+                            writeAutoResume(
+                                menu_list.items[MENU_AUTORESUME].value);
                         dirty = true;
+                    }
                     break;
                 case SW_BTN_A:
                 case SW_BTN_START:
@@ -1112,6 +1176,11 @@ int main(int argc, char *argv[])
                         writeResult("MENU", "BRIGHTNESS", pct);
                         exit_code = 5;
                         quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_AUTORESUME) {
+                        // Nothing to confirm — the flip was already
+                        // published — so A stays put instead of dropping
+                        // the parent out of the menu like Back does
                     }
                     else if (menu_list.active_pos == MENU_CHANGEPIN) {
                         writeResult("MENU", "CHANGEPIN", NULL);
