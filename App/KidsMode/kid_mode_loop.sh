@@ -234,6 +234,12 @@ ensure_pin() {
 # While armed, hide RetroArch's settings so the in-game menu can't be used to
 # change cores, shaders, mappings, etc. Restored from backup on unlock.
 # (Approach borrowed from OnionUI PR #1910.)
+#
+# Kiosk mode only hides settings — the menu itself and RetroArch's other
+# in-game hotkeys still work, so a kid can still reach Quit/Load Content or
+# scramble save-state slots by mashing combos. lock_ra_hotkeys() unbinds
+# them; set "lock_retroarch_hotkeys": false in kidmode.json to keep stock
+# RetroArch shortcuts while armed.
 
 ra_set() {
     if grep -q "^[[:space:]]*$1[[:space:]]*=" "$racfg" 2> /dev/null; then
@@ -241,6 +247,29 @@ ra_set() {
     else
         printf '%s = "%s"\n' "$1" "$2" >> "$racfg"
     fi
+}
+
+# Unbind the in-game shortcuts a kid can trip. Every one of these is a
+# hotkey binding in retroarch.cfg, so the whole lot comes back from
+# retroarch.cfg.backup on unlock. input_exit_emulator is deliberately left
+# alone — Onion's own exit/save paths lean on it.
+lock_ra_hotkeys() {
+    # Every documented way into the menu: the pad combo (this is the
+    # MENU+SELECT one), a direct button bind, and the keyboard bind
+    ra_set input_menu_toggle_gamepad_combo 0
+    ra_set input_menu_toggle_btn nul
+    ra_set input_menu_toggle nul
+
+    # Save states, rewind, fast-forward, screenshots, cheats, shaders and
+    # disc swapping: nothing a kid needs, plenty they can break
+    for hk in load_state save_state state_slot_increase state_slot_decrease \
+        rewind hold_fast_forward toggle_fast_forward toggle_slowmotion \
+        hold_slowmotion screenshot reset cheat_index_plus cheat_index_minus \
+        cheat_toggle shader_next shader_prev disk_eject_toggle disk_next \
+        disk_prev grab_mouse_toggle game_focus_toggle; do
+        ra_set "input_${hk}" nul
+        ra_set "input_${hk}_btn" nul
+    done
 }
 
 apply_ra_lock() {
@@ -251,6 +280,9 @@ apply_ra_lock() {
     fi
 
     ra_set kiosk_mode_enable true
+    if [ "$(config_get lock_retroarch_hotkeys)" != "false" ]; then
+        lock_ra_hotkeys
+    fi
     # Timer countdown arrives via RetroArch's OSD (SHOW_MSG); make sure
     # on-screen notifications are enabled while armed
     ra_set video_font_enable true
@@ -342,6 +374,10 @@ get_timer_minutes() {
         *) echo "$tm" ;;
     esac
 }
+
+# Highest value the pickers offer, in minutes; must match TIMER_MAX in
+# src/kidsMode/kidui.c
+timer_max=120
 
 # ------------------------- volume / brightness caps ------------------------
 # Optional ceilings (percent, 10% steps) the kid can't exceed. kidui does the
@@ -817,7 +853,7 @@ pick_session_timer() {
         case "$picked" in
             '' | *[!0-9]*) picked=0 ;;
         esac
-        [ "$picked" -gt 50 ] && picked=50
+        [ "$picked" -gt "$timer_max" ] && picked="$timer_max"
     fi
     rm -f "$uiresult"
 
@@ -931,7 +967,7 @@ parent_menu() {
                 case "$menu_arg" in
                     '' | *[!0-9]* | 0) ;; # canceled: back to the parent menu
                     *)
-                        [ "$menu_arg" -gt 50 ] && menu_arg=50
+                        [ "$menu_arg" -gt "$timer_max" ] && menu_arg="$timer_max"
                         add_bonus $((menu_arg * 60))
                         # Straight back to the kid so they can play (the menu
                         # already previewed the new remaining time)

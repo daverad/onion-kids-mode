@@ -36,7 +36,7 @@
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
-//                                  picks 5-50 min, A/START applies, and the
+//                                  picks 5-120 min, A/START applies, and the
 //                                  info line previews the new remaining time.
 //   kidui --pick-timer [--no-off] -t "..."
 //                                  minutes picker; with --no-off B cancels
@@ -104,7 +104,7 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_BACK 6
 #define MENU_ROWS 7
 #define TIMER_STEP 5
-#define TIMER_MAX 50
+#define TIMER_MAX 120
 // Volume/brightness ceilings are picked in 10% steps. Brightness never goes
 // fully dark (min 10%); volume 0% = muted.
 #define LEVEL_STEP 10

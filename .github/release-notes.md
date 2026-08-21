@@ -1,23 +1,32 @@
-Kids Mode now looks and feels like part of Onion OS — every screen renders
-through Onion's own theme engine — plus smarter timer controls and a
-PIN system that can't lock you out.
+Straight from the r/MiyooMini thread: longer play sessions, and RetroArch's
+in-game shortcuts really are off while armed.
 
-## Highlights
+## What's new
+
+- **Longer play sessions**: the timer now goes up to **120 minutes**, up
+  from 50 — on the arm screen and on *Add play time* in the parent menu.
+- **RetroArch shortcuts locked while armed**: kiosk mode only ever hid the
+  settings — the menu combo (MENU+SELECT) still opened the RetroArch menu.
+  Now the menu combo, save/load state, state slots, rewind, fast-forward,
+  screenshot, cheats, shader cycling and disc swap are all unbound while
+  Kids Mode is armed, and restored from the backup on unlock. Prefer stock
+  RetroArch shortcuts? Set `"lock_retroarch_hotkeys": false`.
+- **README**: a Settings table for `kidmode.json`, plus an FAQ (including
+  netplay — it's driven from the RetroArch menu, which Kids Mode now
+  blocks, so it isn't available while armed).
+
+## Still in
 
 - **Native Onion look**: your active theme's background, fonts, and colors
   everywhere — header bar with battery, footer button hints, and an
   Apps-menu-style parent menu with full-width rows
-- **Add play time inline**: on the parent menu row, **◀ ▶** picks +5…+50 min
-  and **A** applies — with a live preview of what the remaining time becomes
-- **Turn off timer**: new parent-menu option that removes any running timer
-  entirely for unlimited play (until re-armed or time is added again)
+- **Add play time inline** on the parent menu row, with a live preview of
+  what the remaining time becomes, or **Turn off timer** for unlimited play
 - **Auto power-off**: if the "Time's up!" screen is left alone for 5 minutes,
   the device shuts down cleanly instead of draining the battery overnight
-- **PIN improvements**: **A** confirms (up/down changes a digit, left/right
-  moves); a wrong PIN lets you retry on the same screen; and the PIN now
-  survives app updates via a snapshot in `Saves/kidmode/` — if no PIN exists
-  at all, the unlock gesture asks you to set a new one instead of locking
-  you out
+- **PIN that can't lock you out**: it survives app updates via a snapshot in
+  `Saves/kidmode/`, and if no PIN exists at all the unlock gesture asks you
+  to set a new one
 
 ## Install
 
@@ -26,10 +35,9 @@ PIN system that can't lock you out.
    `/App/KidsMode/`)
 3. Reboot, then arm from **Apps → Kids Mode**
 
-**Updating from v1.0.0:** replacing the `KidsMode` folder resets the PIN
-once (the update-proof snapshot didn't exist yet). If the device was armed,
-hold **SELECT+START** and you'll be asked to set a new PIN. From v1.1.0
-onward, the PIN survives updates.
+**Updating from v1.1.0:** replace the `KidsMode` folder — your PIN survives
+(it's snapshotted in `Saves/kidmode/`). The new RetroArch lock applies the
+next time you arm Kids Mode.
 
 Requires **Onion OS 4.3+**. Tested on a Miyoo Mini Plus running Onion
 4.4-beta; base Mini and Mini V4 are supported in code but less tested —
