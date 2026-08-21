@@ -18,8 +18,15 @@
 //            "MENU" \n "ADDTIME" \n <minutes>   (inline add-time selector)
 //            "MENU" \n "NOTIMER"                (turn the play timer off)
 //            "TIMER" \n <minutes>               (--pick-timer mode)
+//            "MENU" \n "CHANGEPIN"               (set a new PIN)
 //   exit 7:  "POWEROFF"  (Time's up screen sat idle for 5 minutes)
 //   exit 1:  canceled / error / nothing selected (result file removed)
+//
+// The auto-resume toggle and the brightness level are reported out-of-band
+// in /tmp/kidmode_autoresume_result ("1" or "0") and
+// /tmp/kidmode_brightness_result (percent), written the moment they change
+// so they survive leaving the menu with B or Back. Brightness is also
+// applied to the screen there and then.
 //
 // PIN screens: UP/DOWN changes the digit, LEFT/RIGHT moves, A confirms
 // (START is a silent alias). --notice "..." shows a short message under the
@@ -28,15 +35,16 @@
 // failed attempt can retry in place instead of bouncing to the kid screen.
 //
 // Modes:
-//   kidui [--start-pin] [-t "..."] [--notice "..."]
-//                                  carousel (default)
+//   kidui [--start-pin] [--select <rom path>] [-t "..."] [--notice "..."]
+//                                  carousel (default); --select opens on
+//                                  that rom instead of the first favorite
 //   kidui --set-pin -t "..." [--notice "..."]
 //                                  PIN entry only (for initial PIN setup)
-//   kidui --parent-menu --remaining S
+//   kidui --parent-menu --remaining S [--brightness P] [--autoresume 0|1]
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
-//                                  picks 5-50 min, A/START applies, and the
+//                                  picks 5-120 min, A/START applies, and the
 //                                  info line previews the new remaining time.
 //   kidui --pick-timer [--no-off] -t "..."
 //                                  minutes picker; with --no-off B cancels
@@ -56,6 +64,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "components/JsonGameEntry.h"
@@ -64,11 +73,18 @@
 #include "system/keymap_sw.h"
 #include "theme/background.h"
 #include "theme/theme.h"
+#include "utils/flags.h"    // temp_flag_set (signals keymon to reload)
+#include "utils/json.h"
 #include "utils/keystate.h"
 #include "utils/log.h"
 #include "utils/msleep.h"
-#include "utils/sdl_init.h"
+#include "utils/sdl_init.h" // pulls in system/display.h: display_setBrightness
 #include "utils/str.h"
+
+// display_setBrightness(0-10) comes from system/display.h and MAX_BRIGHTNESS
+// (10) from system/settings.h, both pulled in via sdl_init.h. The level is
+// stored in system.json as that same 0-10 value.
+#define SYSTEM_JSON "/mnt/SDCARD/system.json"
 
 #define MAX_GAMES 100
 #define PIN_LEN 4
@@ -76,9 +92,17 @@
 #define UNLOCK_BAR_SHOW_MS 800
 #define PIN_IDLE_TIMEOUT_MS 30000
 #define REMAINING_POLL_MS 2000
+#define BATTERY_POLL_MS 30000
 #define TIMESUP_OFF_MS (5 * 60 * 1000)
 #define REMAINING_FILE "/tmp/kidmode_remaining"
 #define RESULT_FILE "/tmp/kidmode_ui_result"
+// The auto-resume toggle is reported on its own, the moment it is flipped —
+// kid_mode_loop.sh reads this file however the menu is left (a menu action,
+// Back, or B), so the setting can't be lost by exiting the "wrong" way.
+#define AUTORESUME_FILE "/tmp/kidmode_autoresume_result"
+// Brightness is applied live as the row moves, so it is reported the same
+// way rather than waiting for a confirm that a parent has no reason to press.
+#define BRIGHTNESS_FILE "/tmp/kidmode_brightness_result"
 
 typedef enum { SCREEN_CAROUSEL,
                SCREEN_PIN,
@@ -91,9 +115,16 @@ typedef enum { SCREEN_CAROUSEL,
 #define MENU_UNLOCK 0
 #define MENU_ADDTIME 1
 #define MENU_NOTIMER 2
-#define MENU_BACK 3
+#define MENU_BRIGHTNESS 3
+#define MENU_AUTORESUME 4
+#define MENU_CHANGEPIN 5
+#define MENU_BACK 6
+#define MENU_ROWS 7
 #define TIMER_STEP 5
-#define TIMER_MAX 50
+#define TIMER_MAX 120
+// Brightness is picked in 10% steps and never goes fully dark (min 10%).
+#define LEVEL_STEP 10
+#define BRIGHT_MIN_PCT 10
 
 // Big kid-facing text sizes (the theme's own sizes are used for header,
 // list rows and hints via resource_getFont)
@@ -105,6 +136,19 @@ typedef enum { SCREEN_CAROUSEL,
 #define INFO_FONT_SIZE 22
 
 static bool quit = false;
+
+// Startup timing, reported on stderr (kid_mode_loop.sh folds these into
+// kidmode.log). The launcher starts twice per arm — once for the timer
+// picker, once for the carousel — so its start-up cost is paid twice and
+// is worth being able to see.
+static double nowMs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static double t_start = 0;
 
 static JsonGameEntry games[MAX_GAMES];
 static int games_count = 0;
@@ -149,6 +193,10 @@ static int batteryPercentage(void)
         s_battery = battery_getPercentage();
     return s_battery;
 }
+
+// The kid screen shows the level permanently, so it can't be read once at
+// startup and left to go stale while a child browses.
+static void batteryInvalidate(void) { s_battery = -1; }
 
 // On the Miyoo, image files come out of the loader 180°-rotated relative
 // to text rendering — Onion's own theme_backgroundLoad() corrects this by
@@ -260,6 +308,65 @@ static void sigHandler(int sig)
     default:
         break;
     }
+}
+
+// ----------------------- volume / brightness caps --------------------------
+// The parent can cap the kid's max volume and brightness. Enforcement is a
+// soft cap: whenever the live value (system.json, kept current by keymon)
+// sits above the ceiling, we lower it back down and signal keymon to reload.
+// keymon owns the physical +/- buttons, so a kid can nudge past the cap
+// briefly; kid_mode_loop.sh's ticker calls the clamp below every ~10s.
+
+static int readSystemInt(const char *key, int fallback)
+{
+    cJSON *root = json_load(SYSTEM_JSON);
+    int value = fallback;
+    if (root != NULL) {
+        json_getInt(root, key, &value);
+        cJSON_Delete(root);
+    }
+    return value;
+}
+
+// Update a single numeric property in system.json and poke keymon to reload
+// (same mechanism as Onion's settings_saveSystemProperty).
+static void writeSystemInt(const char *key, int value)
+{
+    cJSON *root = json_load(SYSTEM_JSON);
+    if (root == NULL)
+        return;
+    cJSON *prop = cJSON_GetObjectItem(root, key);
+    if (prop != NULL)
+        cJSON_SetNumberValue(prop, value);
+    else
+        cJSON_AddNumberToObject(root, key, value);
+    json_save(root, SYSTEM_JSON);
+    cJSON_Delete(root);
+    temp_flag_set("settings_changed", true);
+}
+
+// Set the screen brightness, floored so it never goes fully dark.
+static void applyBrightness(int pct)
+{
+    if (pct < BRIGHT_MIN_PCT)
+        pct = BRIGHT_MIN_PCT;
+    if (pct > 100)
+        pct = 100;
+    int raw = pct * MAX_BRIGHTNESS / 100;
+    if (raw < 1)
+        raw = 1; // never fully dark
+    display_setBrightness(raw);
+    writeSystemInt("brightness", raw);
+}
+
+// The stored percentage, read back so the menu row opens on the level the
+// screen is actually at.
+static int currentBrightnessPct(void)
+{
+    int raw = readSystemInt("brightness", -1);
+    if (raw < 0)
+        return -1;
+    return raw * 100 / MAX_BRIGHTNESS;
 }
 
 static void loadFavorites(void)
@@ -424,6 +531,114 @@ static int readRemaining(void)
 
 // Small "12 min" chip in the top-right corner (where MainUI keeps its
 // battery), switching to the accent color for the last 5 minutes
+// X already restarts a game; this is the footer hint that says so, next to
+// the theme's own A/PLAY hint. The icon ships with the app (contributed
+// with the feature) — if it's missing the label alone still reads fine.
+#define RESTART_ICON_PATH "/mnt/SDCARD/App/KidsMode/icon-X-54.png"
+
+static SDL_Surface *icon_restart = NULL;
+static bool icon_restart_tried = false;
+
+static SDL_Surface *restartIcon(void)
+{
+    if (icon_restart_tried)
+        return icon_restart;
+    icon_restart_tried = true;
+
+    SDL_Surface *raw = IMG_Load(RESTART_ICON_PATH);
+    if (raw == NULL)
+        return NULL;
+#ifdef PLATFORM_MIYOOMINI
+    // Same loader quirk the box art works around: images come back
+    // 180°-rotated relative to text. scaleSurface also normalises to
+    // 32-bit ARGB, which rotate180InPlace relies on.
+    SDL_Surface *normalized = scaleSurface(raw, raw->w, raw->h);
+    if (normalized != NULL) {
+        SDL_FreeSurface(raw);
+        raw = normalized;
+    }
+    rotate180InPlace(raw);
+#endif
+    icon_restart = SDL_DisplayFormatAlpha(raw);
+    if (icon_restart == NULL)
+        icon_restart = raw;
+    else
+        SDL_FreeSurface(raw);
+    return icon_restart;
+}
+
+static void renderRestartHint(void)
+{
+    int hint_cy = (int)(450.0 * g_scale);
+    int x = (int)(180.0 * g_scale); // clear of the theme's A/PLAY hint
+
+    SDL_Surface *icon = restartIcon();
+    if (icon != NULL) {
+        SDL_Rect pos = {x, hint_cy - icon->h / 2};
+        SDL_BlitSurface(icon, NULL, screen, &pos);
+        x += icon->w + (int)(6.0 * g_scale);
+    }
+    drawTextAlign("RESTART", x, hint_cy, resource_getFont(HINT),
+                  theme()->hint.color, 0, TEXT_LEFT);
+}
+
+// A title too wide for the screen used to lose its tail to an ellipsis.
+// Break it over two lines instead, at the space nearest the middle where
+// both halves fit; titles with no usable break keep the old behaviour.
+static void renderGameTitle(const char *label)
+{
+    int cx = g_display.width / 2;
+    int max_width = g_display.width - (int)(90.0 * g_scale);
+    int title_cy = (int)(400.0 * g_scale);
+    SDL_Color color = theme()->list.color;
+    int w = 0, h = 0;
+
+    if (font_gamelabel == NULL || label == NULL)
+        return;
+
+    TTF_SizeUTF8(font_gamelabel, label, &w, &h);
+    if (w <= max_width) {
+        drawText(label, cx, title_cy, font_gamelabel, color, max_width);
+        return;
+    }
+
+    int len = (int)strlen(label);
+    int split = -1;
+    for (int i = 1; i < len - 1; i++) {
+        if (label[i] != ' ')
+            continue;
+        char head[STR_MAX];
+        int head_w = 0, tail_w = 0;
+        memcpy(head, label, i);
+        head[i] = '\0';
+        TTF_SizeUTF8(font_gamelabel, head, &head_w, &h);
+        TTF_SizeUTF8(font_gamelabel, label + i + 1, &tail_w, &h);
+        if (head_w > max_width || tail_w > max_width)
+            continue;
+        if (split < 0 || abs(i - len / 2) < abs(split - len / 2))
+            split = i;
+    }
+
+    if (split < 0) {
+        drawText(label, cx, title_cy, font_gamelabel, color, max_width);
+        return;
+    }
+
+    char first[STR_MAX], second[STR_MAX];
+    memcpy(first, label, split);
+    first[split] = '\0';
+    strncpy(second, label + split + 1, STR_MAX - 1);
+    second[STR_MAX - 1] = '\0';
+
+    // Two lines sit a little higher than one, to stay clear of the footer
+    int line_h = TTF_FontHeight(font_gamelabel);
+    int block_cy = (int)(385.0 * g_scale);
+    drawText(first, cx, block_cy - line_h / 2, font_gamelabel, color,
+             max_width);
+    drawText(second, cx, block_cy + line_h / 2, font_gamelabel, color,
+             max_width);
+}
+
 static void renderTimeChip(int remaining)
 {
     if (remaining < 0)
@@ -432,8 +647,10 @@ static void renderTimeChip(int remaining)
     char chip[32];
     snprintf(chip, sizeof(chip), "%d min", mins);
     SDL_Color color = mins <= 5 ? accentColor() : theme()->hint.color;
-    drawTextAlign(chip, (int)(620.0 * g_scale), (int)(30.0 * g_scale),
-                  resource_getFont(HINT), color, 0, TEXT_RIGHT);
+    // Left corner: the right one belongs to the battery, exactly where
+    // Onion puts it on every other screen
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
+                  resource_getFont(HINT), color, 0, TEXT_LEFT);
 }
 
 static void renderCarousel(int remaining)
@@ -457,9 +674,8 @@ static void renderCarousel(int remaining)
         drawText("?", cx, art_cy, font_bigvalue, theme()->hint.color, 0);
     }
 
-    // Game title in the theme's list font (big + bold)
-    drawText(games[current].label, cx, (int)(400.0 * g_scale), font_gamelabel,
-             theme()->list.color, g_display.width - (int)(90.0 * g_scale));
+    // Game title in the theme's list font (big + bold), wrapped if long
+    renderGameTitle(games[current].label);
 
     // Browse arrows (theme's own list arrows; browsing wraps around)
     if (games_count > 1) {
@@ -477,13 +693,17 @@ static void renderCarousel(int remaining)
         }
     }
 
-    // Native footer: A = PLAY plus the "2/8" position indicator
+    // Native footer: A = PLAY, X = RESTART, plus the "2/8" indicator
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "PLAY", NULL);
+    renderRestartHint();
     if (games_count > 1)
         theme_renderFooterStatus(screen, current + 1, games_count);
 
     renderTimeChip(remaining);
+    // Onion's own battery rendering (icon + level, top right) — the same
+    // call the menu and PIN screens make, so it looks identical there
+    theme_renderHeaderBattery(screen, batteryPercentage());
 }
 
 static void renderEmpty(void)
@@ -514,6 +734,7 @@ static void renderTimesUp(void)
 {
     renderBase();
     theme_renderHeader(screen, "Time's up!", false);
+    theme_renderHeaderBattery(screen, batteryPercentage());
 
     int cx = g_display.width / 2;
     drawText("Great playing!", cx, (int)(g_display.height * 0.4),
@@ -530,44 +751,76 @@ static void formatAddMinutes(void *self, char *out_label)
     sprintf(out_label, "+%d min", item->value * TIMER_STEP);
 }
 
+static void formatBrightness(void *self, char *out_label)
+{
+    sprintf(out_label, "%d%%", ((ListItem *)self)->value * LEVEL_STEP);
+}
+
+static void formatOnOff(void *self, char *out_label)
+{
+    ListItem *item = (ListItem *)self;
+    strcpy(out_label, item->value ? "On" : "Off");
+}
+
+// Publish the auto-resume choice for kid_mode_loop.sh. Written on every
+// flip rather than on a menu action, so B / Back keep the new value.
+static void writeAutoResume(int on)
+{
+    FILE *fp = fopen(AUTORESUME_FILE, "w");
+    if (fp == NULL)
+        return;
+    fprintf(fp, "%d\n", on ? 1 : 0);
+    fclose(fp);
+}
+
+static void writeBrightness(int pct)
+{
+    FILE *fp = fopen(BRIGHTNESS_FILE, "w");
+    if (fp == NULL)
+        return;
+    fprintf(fp, "%d\n", pct);
+    fclose(fp);
+}
+
 // The parent menu is a real Onion list: full-width rows, the theme's list
 // font and selection background, and an Apps-menu-style value selector on
 // the "Add play time" row.
 static void renderMenu(List *list, int remaining)
 {
     renderBase();
-    theme_renderHeader(screen, "Kids Mode - Parent Menu", false);
+    theme_renderHeader(screen, "Parent Menu", false);
     theme_renderHeaderBattery(screen, batteryPercentage());
     theme_renderList(screen, list);
 
-    // Status line: current remaining time, and — while the add-time row is
-    // selected — what it becomes when applied. Same font as the menu rows,
-    // tucked bottom-right above the footer.
-    char info[STR_MAX] = "";
+    // With a full-height list there's no room for a status line above the
+    // footer, so the time-left status (and the add-time preview Dave asked
+    // for) lives as a compact chip on the empty left side of the header bar.
+    // The title is centered and starts well to the right, so a short left
+    // chip never overlaps it.
+    // Kept short on purpose: the theme's HINT face is wide and the centred
+    // title starts around x=240, so "12 min left" and "12 min -> off" were
+    // being cut to "12 min...". The row itself supplies the units.
+    char chip[64] = "";
     int rem_min = remaining >= 0 ? (remaining + 59) / 60 : -1;
-    if (list->active_pos == MENU_ADDTIME) {
-        int add_min = list->items[MENU_ADDTIME].value * TIMER_STEP;
-        if (rem_min >= 0)
-            snprintf(info, sizeof(info),
-                     "Time left: %d min (%d min after adding)", rem_min,
+    int add_min = list->items[MENU_ADDTIME].value * TIMER_STEP;
+    if (rem_min >= 0) {
+        if (list->active_pos == MENU_ADDTIME)
+            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 %d", rem_min,
                      rem_min + add_min);
+        else if (list->active_pos == MENU_NOTIMER)
+            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 off", rem_min);
         else
-            snprintf(info, sizeof(info), "No timer (%d min after adding)",
-                     add_min);
+            snprintf(chip, sizeof(chip), "%d min", rem_min);
     }
-    else if (list->active_pos == MENU_NOTIMER && rem_min >= 0) {
-        snprintf(info, sizeof(info), "Time left: %d min (no limit after)",
-                 rem_min);
+    else if (list->active_pos == MENU_ADDTIME) {
+        snprintf(chip, sizeof(chip), "+%d min", add_min);
     }
     else {
-        if (rem_min >= 0)
-            snprintf(info, sizeof(info), "Time left: %d min", rem_min);
-        else
-            snprintf(info, sizeof(info), "No timer set");
+        strcpy(chip, "No timer");
     }
-    drawTextAlign(info, (int)(620.0 * g_scale), (int)(395.0 * g_scale),
-                  resource_getFont(LIST), theme()->list.color,
-                  g_display.width - 40, TEXT_RIGHT);
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
+                  resource_getFont(HINT), theme()->hint.color,
+                  (int)(210.0 * g_scale), TEXT_LEFT);
 
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "OK", "BACK");
@@ -696,6 +949,17 @@ static void flip(void)
 
 int main(int argc, char *argv[])
 {
+    t_start = nowMs();
+    // Wall clock at main(), so the log can show how much of the gap is
+    // spent before this point — process spawn and dynamic linking of the
+    // SDL stack off the card, which the ms figures below can't see.
+    {
+        time_t t_wall = time(NULL);
+        struct tm *lt = localtime(&t_wall);
+        if (lt != NULL)
+            fprintf(stderr, "kidui: main at %02d:%02d:%02d\n", lt->tm_hour,
+                    lt->tm_min, lt->tm_sec);
+    }
     bool set_pin_mode = false;
     bool menu_mode = false;
     bool pick_timer_mode = false;
@@ -703,7 +967,11 @@ int main(int argc, char *argv[])
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
+    int menu_bright = -1;  // brightness shown in the menu (%); -1 = read live
+    int set_brightness = -1; // headless: set brightness and exit
+    int menu_autoresume = 0;  // auto-resume toggle state shown in the menu
     char pin_title[STR_MAX] = "";
+    char select_rompath[STR_MAX] = ""; // open the carousel on this game
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--set-pin") == 0)
@@ -722,10 +990,25 @@ int main(int argc, char *argv[])
             menu_timer_minutes = atoi(argv[++i]);
         else if (strcmp(argv[i], "--remaining") == 0 && i + 1 < argc)
             menu_remaining = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--brightness") == 0 && i + 1 < argc)
+            menu_bright = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--set-brightness") == 0 && i + 1 < argc)
+            set_brightness = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--autoresume") == 0 && i + 1 < argc)
+            menu_autoresume = atoi(argv[++i]) != 0;
+        else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc)
+            strncpy(select_rompath, argv[++i], STR_MAX - 1);
         else if ((strcmp(argv[i], "-t") == 0 ||
                   strcmp(argv[i], "--title") == 0) &&
                  i + 1 < argc)
             strncpy(pin_title, argv[++i], STR_MAX - 1);
+    }
+
+    // Headless mode: no UI, just set the brightness and exit. Used when the
+    // parent commits the row and when a session starts.
+    if (set_brightness >= 0) {
+        applyBrightness(set_brightness);
+        return 0;
     }
 
     if (menu_timer_minutes < 0)
@@ -741,6 +1024,7 @@ int main(int argc, char *argv[])
 
     if (!SDL_InitDefault())
         return 1;
+    fprintf(stderr, "kidui: sdl ready at %.0f ms\n", nowMs() - t_start);
 
     // Theme fonts: header/list/hint come straight from the active theme via
     // resource_getFont; these two are the same families at kid-friendly sizes
@@ -752,12 +1036,23 @@ int main(int argc, char *argv[])
         theme_loadFont(theme()->path, theme()->title.font, BIG_VALUE_FONT_SIZE);
     font_info = theme_loadFont(theme()->path, theme()->list.font,
                                INFO_FONT_SIZE);
+    fprintf(stderr, "kidui: fonts ready at %.0f ms\n", nowMs() - t_start);
 
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
 
-    // Parent menu list (native Onion list component)
-    List menu_list = list_create(4, LIST_SMALL);
+    // Open the row on the level the screen is actually at unless told
+    // otherwise, snapped to a whole 10% step
+    if (menu_bright < 0)
+        menu_bright = currentBrightnessPct();
+    if (menu_bright < BRIGHT_MIN_PCT)
+        menu_bright = BRIGHT_MIN_PCT;
+    if (menu_bright > 100)
+        menu_bright = 100;
+
+    // Parent menu list (native Onion list component). Order must match the
+    // MENU_* indices.
+    List menu_list = list_create(MENU_ROWS, LIST_SMALL);
     list_addItem(&menu_list,
                  (ListItem){.label = "Exit Kids Mode", .item_type = ACTION});
     list_addItem(&menu_list, (ListItem){.label = "Add play time",
@@ -770,6 +1065,24 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list, (ListItem){.label = "Turn off timer",
                                         .item_type = ACTION,
                                         .disabled = menu_remaining < 0});
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Brightness",
+                            .item_type = MULTIVALUE,
+                            .value_min = BRIGHT_MIN_PCT / LEVEL_STEP,
+                            .value_max = 100 / LEVEL_STEP,
+                            .value = menu_bright / LEVEL_STEP,
+                            .value_formatter = formatBrightness});
+    // Skip the carousel on boot and drop straight back into the last game
+    // the kid played. Reported the instant it is flipped (writeAutoResume),
+    // not on a menu action.
+    list_addItem(&menu_list, (ListItem){.label = "Auto-resume last game",
+                                        .item_type = MULTIVALUE,
+                                        .value_min = 0,
+                                        .value_max = 1,
+                                        .value = menu_autoresume,
+                                        .value_formatter = formatOnOff});
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Change PIN", .item_type = ACTION});
     list_addItem(&menu_list,
                  (ListItem){.label = "Back", .item_type = ACTION});
 
@@ -789,6 +1102,16 @@ int main(int argc, char *argv[])
     else {
         loadFavorites();
         fprintf(stderr, "kidui: loaded %d favorites\n", games_count);
+        // --select: open on the game the kid played last, so returning from
+        // a game doesn't dump them back at the start of the carousel
+        if (strlen(select_rompath) > 0) {
+            for (int i = 0; i < games_count; i++) {
+                if (strcmp(games[i].rompath, select_rompath) == 0) {
+                    current = i;
+                    break;
+                }
+            }
+        }
         remaining = readRemaining();
         if (remaining == 0)
             active_screen = SCREEN_TIMESUP;
@@ -810,6 +1133,7 @@ int main(int argc, char *argv[])
     uint32_t last_hold_ms = 0;
     uint32_t pin_last_input = SDL_GetTicks();
     uint32_t last_remaining_poll = SDL_GetTicks();
+    uint32_t last_battery_poll = SDL_GetTicks();
     uint32_t timesup_since = 0; // ticks when the Time's up screen appeared
 
     while (!quit) {
@@ -898,7 +1222,9 @@ int main(int argc, char *argv[])
                         quit = true;
                     }
                     else {
-                        // arm flow: B = the default, no timer
+                        // arm flow: B is the shortcut past the picker —
+                        // straight into Kids Mode with no timer, which is
+                        // what the NO TIMER hint promises
                         writeResult("TIMER", "0", NULL);
                         exit_code = 5;
                         quit = true;
@@ -919,14 +1245,28 @@ int main(int argc, char *argv[])
                     dirty = true;
                     break;
                 case SW_BTN_LEFT:
-                    // Value selector on the add-time row (Apps-menu style)
-                    if (list_keyLeft(&menu_list, false))
+                case SW_BTN_RIGHT: {
+                    // Value selectors on the add-time, brightness and
+                    // auto-resume rows (Apps-menu style)
+                    bool changed = changed_key == SW_BTN_LEFT
+                                       ? list_keyLeft(&menu_list, false)
+                                       : list_keyRight(&menu_list, false);
+                    if (changed) {
+                        if (menu_list.active_pos == MENU_AUTORESUME)
+                            writeAutoResume(
+                                menu_list.items[MENU_AUTORESUME].value);
+                        // Brightness takes effect as it moves — a level you
+                        // have to confirm before you can see it is no use
+                        else if (menu_list.active_pos == MENU_BRIGHTNESS) {
+                            int pct = menu_list.items[MENU_BRIGHTNESS].value *
+                                      LEVEL_STEP;
+                            applyBrightness(pct);
+                            writeBrightness(pct);
+                        }
                         dirty = true;
+                    }
                     break;
-                case SW_BTN_RIGHT:
-                    if (list_keyRight(&menu_list, false))
-                        dirty = true;
-                    break;
+                }
                 case SW_BTN_A:
                 case SW_BTN_START:
                     if (menu_list.active_pos == MENU_UNLOCK) {
@@ -945,6 +1285,17 @@ int main(int argc, char *argv[])
                     }
                     else if (menu_list.active_pos == MENU_NOTIMER) {
                         writeResult("MENU", "NOTIMER", NULL);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_AUTORESUME ||
+                             menu_list.active_pos == MENU_BRIGHTNESS) {
+                        // Nothing to confirm — both rows take effect as they
+                        // move — so A stays put instead of dropping the
+                        // parent out of the menu like Back does
+                    }
+                    else if (menu_list.active_pos == MENU_CHANGEPIN) {
+                        writeResult("MENU", "CHANGEPIN", NULL);
                         exit_code = 5;
                         quit = true;
                     }
@@ -1063,6 +1414,16 @@ int main(int argc, char *argv[])
             int prev_remaining = remaining;
             remaining = readRemaining();
 
+            // Re-read the battery every ~30 s so the kid screen's chip
+            // doesn't sit on a startup value all session
+            if (ticks - last_battery_poll > BATTERY_POLL_MS) {
+                last_battery_poll = ticks;
+                int prev_battery = batteryPercentage();
+                batteryInvalidate();
+                if (batteryPercentage() != prev_battery)
+                    dirty = true;
+            }
+
             if (active_screen != SCREEN_PIN) {
                 if (remaining == 0 && active_screen != SCREEN_TIMESUP) {
                     active_screen = SCREEN_TIMESUP;
@@ -1128,6 +1489,11 @@ int main(int argc, char *argv[])
             if (hold_started != 0)
                 renderHoldBar(ticks - hold_started);
             flip();
+            if (t_start > 0) {
+                fprintf(stderr, "kidui: first frame at %.0f ms\n",
+                        nowMs() - t_start);
+                t_start = 0; // once per run
+            }
             dirty = false;
         }
 

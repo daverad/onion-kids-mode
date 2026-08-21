@@ -38,6 +38,9 @@ legacy_rabackup="$appdir/retroarch.cfg.kidmode-backup"
 keymapcfg=/mnt/SDCARD/.tmp_update/config/keymap.json
 keymapbackup="$backupdir/keymap.json.backup"
 keymapnone="$backupdir/keymap-was-absent"
+blfscript=/mnt/SDCARD/.tmp_update/script/blue_light.sh
+blfbackup="$backupdir/blue_light.sh.backup"
+last_game_file="$backupdir/last_game.txt"
 logfile=/mnt/SDCARD/.tmp_update/logs/kidmode.log
 
 timer_state="$backupdir/timer_state.txt" # 3 lines: day / used seconds / bonus seconds
@@ -51,6 +54,8 @@ ticker_pid_file=/tmp/kidmode_ticker.pid
 # kidui reports results via this file, NOT stdout — the device's SDL/driver
 # stack prints noise on stdout, which broke first-line parsing on hardware.
 uiresult=/tmp/kidmode_ui_result
+autoresume_result=/tmp/kidmode_autoresume_result
+brightness_result=/tmp/kidmode_brightness_result
 uilog=/tmp/kidmode_ui_log
 
 export LD_LIBRARY_PATH="/lib:/config/lib:$miyoodir/lib:$sysdir/lib:$sysdir/lib/parasyte"
@@ -59,6 +64,17 @@ export PATH="$sysdir/bin:$PATH"
 log() {
     mkdir -p "$(dirname "$logfile")"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$logfile"
+}
+
+# kidui reports its own start-up timings on stderr (which lands in $uilog).
+# Fold them into the log so the launcher's cost sits next to the arming
+# steps — it starts twice per arm, and that gap is otherwise invisible.
+log_ui_timings() {
+    [ -f "$uilog" ] || return 0
+    grep "^kidui: " "$uilog" 2> /dev/null | while read -r _t; do
+        log "$_t"
+    done
+    return 0
 }
 
 # --------------------------- PIN handling ----------------------------------
@@ -81,12 +97,94 @@ make_salt() {
     fi
 }
 
+# jq is by far the most expensive thing this script runs: a big binary being
+# faulted in from a slow card, and every config_get used to spawn a fresh
+# one. The path from arming to the launcher made five or six of those calls,
+# which is most of the gap between "Kid Mode armed" and the carousel
+# appearing. Read the whole config in a single jq pass, then answer from a
+# cached copy with no subprocess at all; writes invalidate it.
+config_cache=""
+config_cached=0
+
+# One key per line is exactly how jq writes this file, so the common case
+# parses in the shell with no process at all. Anything that doesn't parse
+# cleanly — a hand-edited file all on one line, an escaped quote, a value
+# shape we don't recognise — falls back to jq for the whole file. Getting
+# this wrong would read as "no PIN" and send a parent into the recovery
+# flow, so the parser refuses to guess.
+config_load() {
+    [ "$config_cached" = "1" ] && return 0
+    config_cache=""
+    config_cached=1
+    [ -f "$configfile" ] || return 0
+
+    _cl_ok=1
+    while IFS= read -r _cl_line || [ -n "$_cl_line" ]; do
+        case "$_cl_line" in
+            *'"'*'"'*:*) ;;
+            *) continue ;; # braces, blank lines
+        esac
+
+        _cl_k="${_cl_line#*\"}"
+        _cl_k="${_cl_k%%\"*}"
+        [ -n "$_cl_k" ] || { _cl_ok=0; break; }
+
+        _cl_v="${_cl_line#*:}"
+        # trim whitespace, then the separating comma, then whitespace again
+        while :; do
+            case "$_cl_v" in
+                ' '* | '	'*) _cl_v="${_cl_v#?}" ;;
+                *' ' | *'	') _cl_v="${_cl_v%?}" ;;
+                *,) _cl_v="${_cl_v%,}" ;;
+                *) break ;;
+            esac
+        done
+
+        case "$_cl_v" in
+            null) continue ;;
+            '"'*'"')
+                _cl_v="${_cl_v#\"}"
+                _cl_v="${_cl_v%\"}"
+                # an embedded quote means escaping we are not parsing
+                case "$_cl_v" in *'"'*) _cl_ok=0 ;; esac
+                ;;
+            true | false) ;;
+            '' | *[!0-9]*) _cl_ok=0 ;; # not a bare number either
+        esac
+        [ "$_cl_ok" = "1" ] || break
+
+        config_cache="$config_cache$_cl_k	$_cl_v
+"
+    done < "$configfile"
+
+    if [ "$_cl_ok" != "1" ] || { [ -z "$config_cache" ] && [ -s "$configfile" ]; }; then
+        config_cache="$(jq -r 'to_entries[] | select(.value != null)
+            | "\(.key)	\(.value | tostring)"' "$configfile" 2> /dev/null)"
+        log "config: kidmode.json needed jq to parse (unusual formatting)"
+    fi
+    return 0
+}
+
 config_get() {
     [ -f "$configfile" ] || return 1
-    # NB: not `.[$k] // empty` — that would swallow boolean false
-    jq -r --arg k "$1" \
-        'if has($k) and .[$k] != null then (.[$k] | tostring) else empty end' \
-        "$configfile" 2> /dev/null
+    config_load
+    _cg_ifs="$IFS"
+    IFS='
+'
+    set -f # values are hashes/numbers/booleans, but never glob against them
+    for _cg_line in $config_cache; do
+        case "$_cg_line" in
+            "$1	"*)
+                IFS="$_cg_ifs"
+                set +f
+                printf '%s\n' "${_cg_line#*	}"
+                return 0
+                ;;
+        esac
+    done
+    IFS="$_cg_ifs"
+    set +f
+    return 1
 }
 
 is_4_digits() {
@@ -98,7 +196,13 @@ is_4_digits() {
 
 ensure_config() {
     if [ ! -f "$configfile" ] || ! jq -e . "$configfile" > /dev/null 2>&1; then
+        if [ -f "$configfile" ]; then
+            mkdir -p "$backupdir"
+            cp "$configfile" "$backupdir/kidmode.json.broken" 2> /dev/null
+            log "kidmode.json had invalid JSON; reset to defaults. Broken copy saved to $backupdir/kidmode.json.broken — check it for a missing/extra comma."
+        fi
         printf '{\n    "pin_hash": "",\n    "pin_salt": "",\n    "pin_plain": ""\n}\n' > "$configfile"
+        config_cached=0
     fi
 }
 
@@ -107,6 +211,7 @@ config_merge() {
     ensure_config
     tmpcfg=/tmp/kidmode_config.$$
     jq "$@" "$configfile" > "$tmpcfg" && mv -f "$tmpcfg" "$configfile"
+    config_cached=0
     sync
 }
 
@@ -234,14 +339,12 @@ ensure_pin() {
 # While armed, hide RetroArch's settings so the in-game menu can't be used to
 # change cores, shaders, mappings, etc. Restored from backup on unlock.
 # (Approach borrowed from OnionUI PR #1910.)
-
-ra_set() {
-    if grep -q "^[[:space:]]*$1[[:space:]]*=" "$racfg" 2> /dev/null; then
-        sed -i "s|^[[:space:]]*$1[[:space:]]*=.*|$1 = \"$2\"|" "$racfg"
-    else
-        printf '%s = "%s"\n' "$1" "$2" >> "$racfg"
-    fi
-}
+#
+# Kiosk mode only hides settings — the menu itself and RetroArch's other
+# in-game hotkeys still work, so a kid can still reach Quit/Load Content or
+# scramble save-state slots by mashing combos. lock_ra_hotkeys() unbinds
+# them; set "lock_retroarch_hotkeys": false in kidmode.json to keep stock
+# RetroArch shortcuts while armed.
 
 apply_ra_lock() {
     [ -f "$racfg" ] || return 0
@@ -250,21 +353,114 @@ apply_ra_lock() {
         cp "$racfg" "$rabackup"
     fi
 
-    ra_set kiosk_mode_enable true
-    # Timer countdown arrives via RetroArch's OSD (SHOW_MSG); make sure
-    # on-screen notifications are enabled while armed
-    ra_set video_font_enable true
-    ra_set quick_menu_show_options false
-    ra_set quick_menu_show_cheats false
-    ra_set quick_menu_show_shaders false
-    ra_set quick_menu_show_start_recording false
-    ra_set quick_menu_show_start_streaming false
-    for section in configuration core directory drivers file_browser input \
-        latency network recording user user_interface video audio; do
-        ra_set "settings_show_$section" false
-    done
-    sync
-    log "RetroArch kiosk lock applied."
+    # All ~70 settings are applied in a single awk pass: one read, one
+    # write, however many settings there are.
+    #
+    # The pass matches each line's key ONCE and looks it up in a hash. The
+    # obvious alternative — loop over the settings per line and test
+    # $0 ~ ("^[ \t]*" key[i] "...") — makes busybox awk recompile a
+    # computed regex for every (line x setting) pair. On device that was
+    # ~1900 lines x 70 settings and took 14 seconds of black screen at arm
+    # time, seven times slower than the naive grep+sed version it replaced.
+    # It also left duplicate keys later in the file untouched, and
+    # RetroArch honours the last occurrence — so a config with a repeated
+    # key silently defeated the lock. Matching per line fixes both.
+    #
+    #   kiosk_mode_enable true — locks down the in-game quick menu
+    #   video_font_enable true — timer countdown arrives via RA's OSD
+    #     (SHOW_MSG), so on-screen notifications must stay on
+    #   quick_menu_show_* false — hide options/cheats/shaders/record/stream
+    #     from the (already locked-down) quick menu
+    #   settings_show_* false — hide every settings category
+    #   input_*_btn nul — every documented RetroArch hotkey action,
+    #     disabled. MENU is input_enable_hotkey_btn, held with another
+    #     button: this covers MENU+SELECT (open RA's menu), MENU+L2/R2
+    #     (save/load state), MENU+L/R (rewind/fast-forward), MENU+LEFT/
+    #     RIGHT (save-slot change), MENU+START (fullscreen), and every
+    #     other hotkey RetroArch documents — even ones not expected by
+    #     default, so nothing is left reachable via MENU+<button>. The
+    #     individual actions are cleared rather than input_enable_hotkey_btn
+    #     itself, because unbinding the enable button would make each of
+    #     these fire on a single un-combo'd press instead. MENU+VOLUME for
+    #     brightness is handled outside RetroArch (by the system's button
+    #     daemon) and is unaffected by any of this.
+    ra_keys="kiosk_mode_enable video_font_enable quick_menu_show_options
+        quick_menu_show_cheats quick_menu_show_shaders
+        quick_menu_show_start_recording quick_menu_show_start_streaming
+        settings_show_configuration settings_show_core
+        settings_show_directory settings_show_drivers
+        settings_show_file_browser settings_show_input
+        settings_show_latency settings_show_network settings_show_recording
+        settings_show_user settings_show_user_interface settings_show_video
+        settings_show_audio"
+
+    # The in-game hotkeys are the half a parent may want to keep: set
+    # "lock_retroarch_hotkeys": false in kidmode.json to leave RetroArch's
+    # own shortcuts alone (the kiosk settings above always apply).
+    ra_hotkeys="input_menu_toggle_btn input_save_state_btn
+        input_load_state_btn input_rewind_btn input_toggle_fast_forward_btn
+        input_hold_fast_forward_btn input_state_slot_increase_btn
+        input_state_slot_decrease_btn input_toggle_fullscreen_btn
+        input_shader_toggle_btn input_shader_next_btn input_shader_prev_btn
+        input_reset_btn input_screenshot_btn input_pause_toggle_btn
+        input_frame_advance_btn input_cheat_toggle_btn
+        input_movie_record_toggle_btn input_recording_toggle_btn
+        input_streaming_toggle_btn input_netplay_game_watch_btn
+        input_ai_service_btn input_audio_mute_btn
+        input_cheat_index_minus_btn input_cheat_index_plus_btn
+        input_close_content_btn input_desktop_menu_toggle_btn
+        input_disk_eject_toggle_btn input_disk_next_btn input_disk_prev_btn
+        input_exit_emulator_btn input_fps_toggle_btn
+        input_game_focus_toggle_btn input_grab_mouse_toggle_btn
+        input_hold_slowmotion_btn input_osk_toggle_btn
+        input_overlay_next_btn input_preempt_toggle_btn
+        input_runahead_toggle_btn input_send_debug_info_btn
+        input_toggle_slowmotion_btn input_toggle_statistics_btn
+        input_toggle_vrr_runloop_btn input_volume_up_btn
+        input_volume_down_btn input_netplay_fade_chat_toggle_btn
+        input_netplay_host_toggle_btn input_netplay_ping_toggle_btn
+        input_netplay_player_chat_btn"
+
+    if [ "$(config_get lock_retroarch_hotkeys)" != "false" ]; then
+        ra_keys="$ra_keys $ra_hotkeys"
+    fi
+
+    tmpra=/tmp/kidmode_ra.$$
+    awkprog=/tmp/kidmode_ra_awk.$$
+    {
+        echo 'BEGIN {'
+        for k in $ra_keys; do
+            case "$k" in
+                kiosk_mode_enable | video_font_enable) v=true ;;
+                quick_menu_show_* | settings_show_*) v=false ;;
+                *) v=nul ;;
+            esac
+            printf '  val["%s"]="%s";\n' "$k" "$v"
+        done
+        echo '}'
+        cat << 'AWKEOF'
+{
+    if (match($0, /^[ \t]*[A-Za-z0-9_]+[ \t]*=/)) {
+        k = substr($0, RSTART, RLENGTH)
+        gsub(/[ \t=]/, "", k)
+        if (k in val) {
+            print k " = \"" val[k] "\""
+            seen[k] = 1
+            next
+        }
+    }
+    print $0
+}
+END {
+    for (k in val)
+        if (!(k in seen)) print k " = \"" val[k] "\""
+}
+AWKEOF
+    } > "$awkprog"
+
+    awk -f "$awkprog" "$racfg" > "$tmpra" && mv -f "$tmpra" "$racfg"
+    rm -f "$awkprog"
+    log "RetroArch kiosk lock applied (in-game hotkeys disabled), single pass."
 }
 
 restore_ra_lock() {
@@ -279,6 +475,103 @@ restore_ra_lock() {
         sync
         log "RetroArch config restored (legacy backup)."
     fi
+}
+
+# ------------------------ Blue-light-filter lock ----------------------------
+# MENU+B is a system-level shortcut (handled by keymon, outside RetroArch)
+# that toggles the blue-light filter by calling this script with "enable" or
+# "disable". While armed, we prepend a guard that makes those two calls a
+# no-op, so the manual toggle does nothing. The scheduled auto on/off (if the
+# person has that feature configured) is untouched, since it calls the
+# enable/disable shell functions directly rather than going through this
+# case dispatch. Original script restored byte-for-byte on unlock.
+
+apply_blf_lock() {
+    [ -f "$blfscript" ] || return 0
+    mkdir -p "$backupdir"
+    if ! grep -q "KIDMODE_BLF_GUARD" "$blfscript" 2> /dev/null; then
+        [ -f "$blfbackup" ] || cp "$blfscript" "$blfbackup"
+        tmpblf=/tmp/kidmode_blf.$$
+        {
+            printf '%s\n' "# KIDMODE_BLF_GUARD: while Kids Mode is armed, ignore the manual"
+            printf '%s\n' "# MENU+B toggle (this script called with enable/disable) so a kid"
+            printf '%s\n' "# can't turn the blue-light filter on/off mid-game."
+            printf '%s\n' 'if [ -f /mnt/SDCARD/.kidmode ] && { [ "$1" = "enable" ] || [ "$1" = "disable" ]; }; then'
+            printf '%s\n' '    exit 0'
+            printf '%s\n' 'fi'
+            cat "$blfscript"
+        } > "$tmpblf"
+        mv -f "$tmpblf" "$blfscript"
+        chmod +x "$blfscript" 2> /dev/null
+        log "MENU+B blue-light toggle disabled while armed."
+    fi
+}
+
+restore_blf_lock() {
+    if [ -f "$blfbackup" ]; then
+        cp "$blfbackup" "$blfscript"
+        rm -f "$blfbackup"
+        chmod +x "$blfscript" 2> /dev/null
+        sync
+        log "blue_light.sh restored."
+    fi
+}
+
+# ------------------------------ save profile --------------------------------
+# Saves/CurrentProfile holds several DIFFERENT kinds of data mixed together:
+# actual save files/save-states and GameSwitcher's thumbnail cache (personal,
+# tied to who's playing) alongside config/ — RetroArch's per-core settings
+# like aspect ratio, scanlines/shaders, CPU clock — and theme/, which are
+# device-wide preferences, not personal data, and should stay exactly the
+# same no matter who's playing.
+#
+# Onion's own Guest Mode swaps the WHOLE folder (MainProfile <->
+# GuestProfile) since a guest is meant to get a fully separate setup. Kids
+# Mode only wants the personal parts isolated — so we swap just the
+# saves/states/romScreens subfolders individually, leaving config/, theme/,
+# and lists/ untouched and shared throughout.
+#
+# The kid's own save progress should persist across sessions — so instead of
+# a throwaway park each time, Kids Mode keeps its own permanent
+# Saves/KidsProfile (holding just these three subfolders) that's swapped in
+# at arm time and swapped back out (keeping whatever was added) at disarm,
+# while whatever was there before (from Main or Guest — we don't need to
+# know which) is parked untouched in between. A plain directory rename
+# can't partially fail or leave mismatched data the way editing files in
+# place could.
+current_profile=/mnt/SDCARD/Saves/CurrentProfile
+kids_profile=/mnt/SDCARD/Saves/KidsProfile
+isolated_subdirs="saves states romScreens"
+
+apply_profile_isolation() {
+    mkdir -p "$kids_profile" "$current_profile" "$backupdir"
+    for d in $isolated_subdirs; do
+        rm -rf "$backupdir/profile-parked-$d"
+        if [ -d "$current_profile/$d" ]; then
+            mv "$current_profile/$d" "$backupdir/profile-parked-$d"
+        fi
+        if [ -d "$kids_profile/$d" ]; then
+            mv "$kids_profile/$d" "$current_profile/$d"
+        else
+            mkdir -p "$current_profile/$d"
+        fi
+    done
+    log "Switched to the kid's own saves/states/thumbnails for this session."
+}
+
+restore_profile_isolation() {
+    mkdir -p "$kids_profile"
+    for d in $isolated_subdirs; do
+        rm -rf "$kids_profile/$d"
+        if [ -d "$current_profile/$d" ]; then
+            mv "$current_profile/$d" "$kids_profile/$d" # keep kid's progress for next time
+        fi
+        if [ -d "$backupdir/profile-parked-$d" ]; then
+            mv "$backupdir/profile-parked-$d" "$current_profile/$d"
+        fi
+    done
+    sync
+    log "Restored the previous saves/states/thumbnails."
 }
 
 # ------------------------- MENU button override ----------------------------
@@ -302,7 +595,6 @@ apply_keymap_override() {
         touch "$keymapnone"
         printf '{\n    "ingame_single_press": 2\n}\n' > "$keymapcfg"
     fi
-    sync
     killall keymon 2> /dev/null
     keymon &
     log "MENU button set to exit-to-launcher while armed."
@@ -343,14 +635,71 @@ get_timer_minutes() {
     esac
 }
 
-state_day() { sed -n 1p "$timer_state" 2> /dev/null; }
+# Highest value the pickers offer, in minutes; must match TIMER_MAX in
+# src/kidsMode/kidui.c
+timer_max=120
+
+# ------------------------------ brightness ---------------------------------
+# The parent sets the screen brightness from the menu; kidui writes it to
+# system.json and pokes the backlight. Stored so a session starts at the
+# level the parent chose. Absent = leave the screen alone.
+# (There is no volume equivalent: see the note in apply_brightness.)
+
+get_brightness_pct() {
+    v="$(config_get brightness_pct)"
+    case "$v" in
+        '' | *[!0-9]*) echo -1 ;; # never set: leave the screen as it is
+        *)
+            [ "$v" -gt 100 ] && v=100
+            [ "$v" -lt 10 ] && v=10 # never let the screen go fully dark
+            echo "$v"
+            ;;
+    esac
+}
+
+# Apply the stored brightness, if there is one.
+#
+# NB there is deliberately no volume counterpart. A stored ceiling was tried
+# and did nothing audible: while a game is running the level is owned by the
+# already-running audioserver, and a short-lived helper calling setVolume
+# can't reach it. Capping it for real needs keymon patched, which this
+# project stays out of by design.
+apply_brightness() {
+    [ -x "$kidui_bin" ] || return 0
+    bpct="$(get_brightness_pct)"
+    [ "$bpct" -ge 0 ] && "$kidui_bin" --set-brightness "$bpct" > /dev/null 2>&1
+    return 0
+}
+
+# Read all three lines in one go, in the shell. This is called from the
+# ticker every 10s and twice on the way to the launcher; three sed spawns
+# each time is a real cost on this hardware.
+state_read() {
+    st_day=""
+    st_used=0
+    st_bonus=0
+    [ -f "$timer_state" ] || return 0
+    {
+        IFS= read -r st_day || true
+        IFS= read -r st_used || true
+        IFS= read -r st_bonus || true
+    } < "$timer_state" 2> /dev/null
+    case "$st_used" in '' | *[!0-9]*) st_used=0 ;; esac
+    case "$st_bonus" in '' | *[!0-9]*) st_bonus=0 ;; esac
+    return 0
+}
+
+state_day() {
+    state_read
+    printf '%s\n' "$st_day"
+}
 state_used() {
-    v="$(sed -n 2p "$timer_state" 2> /dev/null)"
-    case "$v" in '' | *[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+    state_read
+    printf '%s\n' "$st_used"
 }
 state_bonus() {
-    v="$(sed -n 3p "$timer_state" 2> /dev/null)"
-    case "$v" in '' | *[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
+    state_read
+    printf '%s\n' "$st_bonus"
 }
 
 state_write() { # $1 used, $2 bonus
@@ -405,7 +754,7 @@ notify_game() {
 }
 
 # RA's OSD messages last ~3 s; re-pushing the same text every ~2 s makes it
-# render as one continuous message. Covers one 10 s ticker interval.
+# render as one continuous message.
 pin_message() {
     (
         for _i in 1 2 3 4 5; do
@@ -514,7 +863,6 @@ stop_ticker() {
         kill "$(cat "$ticker_pid_file")" 2> /dev/null
         rm -f "$ticker_pid_file"
     fi
-    killall imgpop 2> /dev/null # remove any lingering chip overlay
     rm -f "$remaining_file"
 }
 
@@ -762,22 +1110,31 @@ ensure_fav_shortcut() {
 }
 
 # --------------------------- session timer picker --------------------------
-# Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 50 minutes
-# (default OFF). Selecting a value starts a fresh budget for this session.
+# Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 120 minutes
+# (default OFF; must match TIMER_MAX in src/kidsMode/kidui.c). Selecting a
+# value starts a fresh budget for this session.
 
 pick_session_timer() {
+    log "launcher: starting kidui (timer picker)"
     rm -f "$uiresult"
     "$kidui_bin" --pick-timer > "$uilog" 2>&1
     picker_rc=$?
+    log_ui_timings
 
-    picked=0
-    if [ "$picker_rc" -eq 5 ] && [ "$(sed -n 1p "$uiresult")" = "TIMER" ]; then
-        picked="$(sed -n 2p "$uiresult")"
-        case "$picked" in
-            '' | *[!0-9]*) picked=0 ;;
-        esac
-        [ "$picked" -gt 50 ] && picked=50
+    # A picks the shown value, B means "no timer" — both come back as a
+    # TIMER result. Anything else means kidui never got that far (crash,
+    # missing libs), and arming on a launcher that won't start would leave
+    # the device stuck, so bail out instead.
+    if [ "$picker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "TIMER" ]; then
+        rm -f "$uiresult"
+        return 1
     fi
+
+    picked="$(sed -n 2p "$uiresult")"
+    case "$picked" in
+        '' | *[!0-9]*) picked=0 ;;
+    esac
+    [ "$picked" -gt "$timer_max" ] && picked="$timer_max"
     rm -f "$uiresult"
 
     set_timer_minutes "$picked"
@@ -785,18 +1142,76 @@ pick_session_timer() {
     update_remaining_now
 }
 
+# -------------------------------- change PIN -------------------------------
+# Set a new PIN from inside the parent menu (the parent already unlocked, so
+# no need to re-verify the old one). A mismatch retries in place; B cancels.
+
+change_pin() {
+    cp_notice=""
+    while :; do
+        cp1="$(run_pin_entry "Set new PIN" "$cp_notice")" || return 1
+        cp2="$(run_pin_entry "Confirm new PIN")" || return 1
+        if [ "$cp1" = "$cp2" ]; then
+            store_pin "$cp1"
+            infoPanel -t "Kids Mode" -m "PIN updated." --auto
+            return 0
+        fi
+        cp_notice="PINs did not match - try again"
+    done
+}
+
 # ------------------------------ parent menu --------------------------------
-# Shown after a correct PIN: exit Kids Mode or add play time. "Add play
-# time" is an inline value selector on the menu row itself (LEFT/RIGHT to
-# pick 5-50 min, A/START to apply) — kidui reports the chosen minutes on
-# line 3 of the result. Returns 0 = unlock requested, 1 = stay in Kid Mode.
+# Shown after a correct PIN: exit Kids Mode, add/turn off play time, set the
+# max volume/brightness ceilings, flip auto-resume, or change the PIN. Value
+# rows report the chosen value on line 3 of the result; the auto-resume
+# toggle is reported separately (see below). Returns 0 = unlock requested,
+# 1 = stay in Kid Mode.
 
 parent_menu() {
     while :; do
-        rm -f "$uiresult"
+        rm -f "$uiresult" "$autoresume_result" "$brightness_result"
+        ar_val=0
+        [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
         "$kidui_bin" --parent-menu \
-            --remaining "$(timer_remaining)" > "$uilog" 2>&1
+            --remaining "$(timer_remaining)" \
+            --brightness "$(get_brightness_pct)" \
+            --autoresume "$ar_val" > "$uilog" 2>&1
         menu_rc=$?
+
+        # The toggle is written the instant the parent flips it (not
+        # deferred to some specific exit action), so sync it into
+        # kidmode.json regardless of how the menu was left — Back, B, or
+        # any other action below.
+        # Brightness is applied to the screen by kidui as the row moves;
+        # all that is left here is remembering it for the next session.
+        if [ -f "$brightness_result" ]; then
+            new_bright="$(sed -n 1p "$brightness_result")"
+            rm -f "$brightness_result"
+            case "$new_bright" in
+                '' | *[!0-9]*) ;;
+                *)
+                    [ "$new_bright" -gt 100 ] && new_bright=100
+                    [ "$new_bright" -lt 10 ] && new_bright=10
+                    config_merge --argjson b "$new_bright" '.brightness_pct = $b'
+                    log "Brightness set to ${new_bright}% from the parent menu."
+                    ;;
+            esac
+        fi
+
+        if [ -f "$autoresume_result" ]; then
+            new_ar_val="$(sed -n 1p "$autoresume_result")"
+            rm -f "$autoresume_result"
+            case "$new_ar_val" in
+                1)
+                    config_merge '.auto_resume_last_game = true'
+                    log "Auto-resume last game turned ON from the parent menu."
+                    ;;
+                0)
+                    config_merge '.auto_resume_last_game = false'
+                    log "Auto-resume last game turned OFF from the parent menu."
+                    ;;
+            esac
+        fi
 
         if [ "$menu_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "MENU" ]; then
             rm -f "$uiresult"
@@ -821,6 +1236,10 @@ parent_menu() {
                 log "Play timer turned off from the parent menu."
                 return 1
                 ;;
+            CHANGEPIN)
+                change_pin
+                # Stay in the menu regardless of outcome
+                ;;
             ADDTIME)
                 case "$menu_arg" in
                     '' | *[!0-9]*)
@@ -839,7 +1258,7 @@ parent_menu() {
                 case "$menu_arg" in
                     '' | *[!0-9]* | 0) ;; # canceled: back to the parent menu
                     *)
-                        [ "$menu_arg" -gt 50 ] && menu_arg=50
+                        [ "$menu_arg" -gt "$timer_max" ] && menu_arg="$timer_max"
                         add_bonus $((menu_arg * 60))
                         # Straight back to the kid so they can play (the menu
                         # already previewed the new remaining time)
@@ -857,6 +1276,8 @@ disarm() {
     rm -f "$flagfile"
     stop_ticker
     restore_ra_lock
+    restore_blf_lock
+    restore_profile_isolation
     restore_keymap_override
     ensure_fav_shortcut
     rm -f "$sysdir/cmd_to_run.sh" "$uiresult"
@@ -881,6 +1302,7 @@ cmd_run() {
 
     ui_fails=0
     pin_fails=0
+    ui_timed=0
     pin_notice=""
     update_remaining_now
 
@@ -889,6 +1311,9 @@ cmd_run() {
     if has_pin && [ ! -f "$pin_backup" ]; then
         backup_pin
     fi
+
+    # Start the session at the brightness the parent picked
+    apply_brightness
 
     start_ticker
 
@@ -900,6 +1325,21 @@ cmd_run() {
         else
             log "resuming interrupted game"
             run_game_cmd
+        fi
+    elif [ "$(config_get auto_resume_last_game)" = "true" ] &&
+        [ -f "$last_game_file" ] && [ "$(timer_remaining)" != "0" ]; then
+        # Opt in with "auto_resume_last_game": true in kidmode.json: skip
+        # the carousel on boot and go straight back into the last game the
+        # child played, like stock Onion's own auto-resume.
+        lg_launch="$(sed -n 1p "$last_game_file")"
+        lg_rompath="$(sed -n 2p "$last_game_file")"
+        if [ -n "$lg_launch" ] && [ -f "$lg_launch" ] && [ -f "$lg_rompath" ]; then
+            log "auto-resuming last game: $lg_rompath"
+            build_game_cmd "$lg_launch" "$lg_rompath"
+            run_game_cmd
+        else
+            log "auto_resume_last_game set but last game no longer exists; showing carousel."
+            rm -f "$last_game_file"
         fi
     fi
 
@@ -918,7 +1358,11 @@ cmd_run() {
             no_pin_recovery=1
         fi
 
+        [ "$ui_timed" = "1" ] || log "launcher: starting kidui"
+
         rm -f "$uiresult"
+        select_rompath=""
+        [ -f "$last_game_file" ] && select_rompath="$(sed -n 2p "$last_game_file")"
         if [ "$no_pin_recovery" = "1" ] && [ -n "$pin_notice" ]; then
             "$kidui_bin" -t "Set a new PIN" --start-pin --notice "$pin_notice" > "$uilog" 2>&1
         elif [ "$no_pin_recovery" = "1" ]; then
@@ -927,10 +1371,18 @@ cmd_run() {
             # Wrong PIN last time: reopen straight on the PIN screen so the
             # parent can try again in place
             "$kidui_bin" --start-pin --notice "$pin_notice" > "$uilog" 2>&1
+        elif [ -n "$select_rompath" ]; then
+            "$kidui_bin" --select "$select_rompath" > "$uilog" 2>&1
         else
             "$kidui_bin" > "$uilog" 2>&1
         fi
         ui_rc=$?
+        # Only the first launcher start per session — after that it is the
+        # same cost on every return from a game, and just noise in the log
+        if [ "$ui_timed" != "1" ]; then
+            ui_timed=1
+            log_ui_timings
+        fi
         pin_notice=""
 
         check_off_order "End"
@@ -954,6 +1406,11 @@ cmd_run() {
                 else
                     build_game_cmd "$sel_launch" "$sel_rompath"
                 fi
+                # Remember this as "the last game" (plain resume form, not
+                # the fresh-start variant) so a future boot can auto-resume
+                # it if auto_resume_last_game is enabled.
+                mkdir -p "$backupdir"
+                printf '%s\n%s\n' "$sel_launch" "$sel_rompath" > "$last_game_file"
                 run_game_cmd
                 ui_fails=0
                 ;;
@@ -1019,6 +1476,8 @@ cmd_run() {
     # Flag removed externally (e.g. deleted from a computer) — clean up
     stop_ticker
     restore_ra_lock
+    restore_blf_lock
+    restore_profile_isolation
     restore_keymap_override
     rm -f "$sysdir/cmd_to_run.sh"
     bootScreen clear 2> /dev/null
@@ -1048,11 +1507,20 @@ cmd_arm() {
         return 1
     fi
 
-    pick_session_timer
+    if ! pick_session_timer; then
+        infoPanel -t "Kids Mode" -m "Couldn't start the launcher.\nKids Mode was NOT armed." --auto
+        return 1
+    fi
 
+    # Arming rewrites four files and moves three folders, then flushes once
+    # at the end rather than after each step.
+    log "Arming: applying locks and swapping the kid's profile..."
     apply_ra_lock
+    apply_blf_lock
+    apply_profile_isolation
     apply_keymap_override
     ensure_fav_shortcut
+    apply_brightness
     touch "$flagfile"
     sync
     log "Kid Mode armed (timer: $(get_timer_minutes) min)."
