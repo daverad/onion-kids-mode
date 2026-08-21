@@ -32,6 +32,15 @@ device.
 - Coming back from a game reopens the carousel **on the game just played**,
   not at the start.
 
+## Carousel
+
+- **Battery level** on the kid screen, opposite the play-time chip, turning
+  accent-coloured under 15%.
+- **X = RESTART** now has a footer hint and icon, so the start-over shortcut
+  is visible instead of hidden.
+- **Long titles wrap** onto a second line instead of being cut off with an
+  ellipsis.
+
 ## Also
 
 - README gains a settings table for `kidmode.json` and an FAQ (including

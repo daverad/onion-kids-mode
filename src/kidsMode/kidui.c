@@ -92,6 +92,7 @@
 #define UNLOCK_BAR_SHOW_MS 800
 #define PIN_IDLE_TIMEOUT_MS 30000
 #define REMAINING_POLL_MS 2000
+#define BATTERY_POLL_MS 30000
 #define TIMESUP_OFF_MS (5 * 60 * 1000)
 #define REMAINING_FILE "/tmp/kidmode_remaining"
 #define RESULT_FILE "/tmp/kidmode_ui_result"
@@ -178,6 +179,10 @@ static int batteryPercentage(void)
         s_battery = battery_getPercentage();
     return s_battery;
 }
+
+// The kid screen shows the level permanently, so it can't be read once at
+// startup and left to go stale while a child browses.
+static void batteryInvalidate(void) { s_battery = -1; }
 
 // On the Miyoo, image files come out of the loader 180°-rotated relative
 // to text rendering — Onion's own theme_backgroundLoad() corrects this by
@@ -519,6 +524,134 @@ static int readRemaining(void)
 
 // Small "12 min" chip in the top-right corner (where MainUI keeps its
 // battery), switching to the accent color for the last 5 minutes
+// Battery on the kid screen, mirroring the play-time chip on the other
+// side. The carousel draws no header bar, so it can't use Onion's
+// theme_renderHeaderBattery the way the menu and PIN screens do — same
+// idea, same HINT font, drawn by hand. Turns accent-coloured when it's
+// low, like the timer does in its last five minutes.
+#define BATTERY_LOW_PCT 15
+
+static void renderBatteryChip(void)
+{
+    int pct = batteryPercentage();
+    if (pct < 0)
+        return;
+    char chip[16];
+    snprintf(chip, sizeof(chip), "%d%%", pct);
+    SDL_Color color =
+        pct <= BATTERY_LOW_PCT ? accentColor() : theme()->hint.color;
+    drawTextAlign(chip, (int)(20.0 * g_scale), (int)(30.0 * g_scale),
+                  resource_getFont(HINT), color, 0, TEXT_LEFT);
+}
+
+// X already restarts a game; this is the footer hint that says so, next to
+// the theme's own A/PLAY hint. The icon ships with the app (contributed
+// with the feature) — if it's missing the label alone still reads fine.
+#define RESTART_ICON_PATH "/mnt/SDCARD/App/KidsMode/icon-X-54.png"
+
+static SDL_Surface *icon_restart = NULL;
+static bool icon_restart_tried = false;
+
+static SDL_Surface *restartIcon(void)
+{
+    if (icon_restart_tried)
+        return icon_restart;
+    icon_restart_tried = true;
+
+    SDL_Surface *raw = IMG_Load(RESTART_ICON_PATH);
+    if (raw == NULL)
+        return NULL;
+#ifdef PLATFORM_MIYOOMINI
+    // Same loader quirk the box art works around: images come back
+    // 180°-rotated relative to text. scaleSurface also normalises to
+    // 32-bit ARGB, which rotate180InPlace relies on.
+    SDL_Surface *normalized = scaleSurface(raw, raw->w, raw->h);
+    if (normalized != NULL) {
+        SDL_FreeSurface(raw);
+        raw = normalized;
+    }
+    rotate180InPlace(raw);
+#endif
+    icon_restart = SDL_DisplayFormatAlpha(raw);
+    if (icon_restart == NULL)
+        icon_restart = raw;
+    else
+        SDL_FreeSurface(raw);
+    return icon_restart;
+}
+
+static void renderRestartHint(void)
+{
+    int hint_cy = (int)(450.0 * g_scale);
+    int x = (int)(180.0 * g_scale); // clear of the theme's A/PLAY hint
+
+    SDL_Surface *icon = restartIcon();
+    if (icon != NULL) {
+        SDL_Rect pos = {x, hint_cy - icon->h / 2};
+        SDL_BlitSurface(icon, NULL, screen, &pos);
+        x += icon->w + (int)(6.0 * g_scale);
+    }
+    drawTextAlign("RESTART", x, hint_cy, resource_getFont(HINT),
+                  theme()->hint.color, 0, TEXT_LEFT);
+}
+
+// A title too wide for the screen used to lose its tail to an ellipsis.
+// Break it over two lines instead, at the space nearest the middle where
+// both halves fit; titles with no usable break keep the old behaviour.
+static void renderGameTitle(const char *label)
+{
+    int cx = g_display.width / 2;
+    int max_width = g_display.width - (int)(90.0 * g_scale);
+    int title_cy = (int)(400.0 * g_scale);
+    SDL_Color color = theme()->list.color;
+    int w = 0, h = 0;
+
+    if (font_gamelabel == NULL || label == NULL)
+        return;
+
+    TTF_SizeUTF8(font_gamelabel, label, &w, &h);
+    if (w <= max_width) {
+        drawText(label, cx, title_cy, font_gamelabel, color, max_width);
+        return;
+    }
+
+    int len = (int)strlen(label);
+    int split = -1;
+    for (int i = 1; i < len - 1; i++) {
+        if (label[i] != ' ')
+            continue;
+        char head[STR_MAX];
+        int head_w = 0, tail_w = 0;
+        memcpy(head, label, i);
+        head[i] = '\0';
+        TTF_SizeUTF8(font_gamelabel, head, &head_w, &h);
+        TTF_SizeUTF8(font_gamelabel, label + i + 1, &tail_w, &h);
+        if (head_w > max_width || tail_w > max_width)
+            continue;
+        if (split < 0 || abs(i - len / 2) < abs(split - len / 2))
+            split = i;
+    }
+
+    if (split < 0) {
+        drawText(label, cx, title_cy, font_gamelabel, color, max_width);
+        return;
+    }
+
+    char first[STR_MAX], second[STR_MAX];
+    memcpy(first, label, split);
+    first[split] = '\0';
+    strncpy(second, label + split + 1, STR_MAX - 1);
+    second[STR_MAX - 1] = '\0';
+
+    // Two lines sit a little higher than one, to stay clear of the footer
+    int line_h = TTF_FontHeight(font_gamelabel);
+    int block_cy = (int)(385.0 * g_scale);
+    drawText(first, cx, block_cy - line_h / 2, font_gamelabel, color,
+             max_width);
+    drawText(second, cx, block_cy + line_h / 2, font_gamelabel, color,
+             max_width);
+}
+
 static void renderTimeChip(int remaining)
 {
     if (remaining < 0)
@@ -552,9 +685,8 @@ static void renderCarousel(int remaining)
         drawText("?", cx, art_cy, font_bigvalue, theme()->hint.color, 0);
     }
 
-    // Game title in the theme's list font (big + bold)
-    drawText(games[current].label, cx, (int)(400.0 * g_scale), font_gamelabel,
-             theme()->list.color, g_display.width - (int)(90.0 * g_scale));
+    // Game title in the theme's list font (big + bold), wrapped if long
+    renderGameTitle(games[current].label);
 
     // Browse arrows (theme's own list arrows; browsing wraps around)
     if (games_count > 1) {
@@ -572,13 +704,15 @@ static void renderCarousel(int remaining)
         }
     }
 
-    // Native footer: A = PLAY plus the "2/8" position indicator
+    // Native footer: A = PLAY, X = RESTART, plus the "2/8" indicator
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, "PLAY", NULL);
+    renderRestartHint();
     if (games_count > 1)
         theme_renderFooterStatus(screen, current + 1, games_count);
 
     renderTimeChip(remaining);
+    renderBatteryChip();
 }
 
 static void renderEmpty(void)
@@ -609,6 +743,7 @@ static void renderTimesUp(void)
 {
     renderBase();
     theme_renderHeader(screen, "Time's up!", false);
+    theme_renderHeaderBattery(screen, batteryPercentage());
 
     int cx = g_display.width / 2;
     drawText("Great playing!", cx, (int)(g_display.height * 0.4),
@@ -1013,6 +1148,7 @@ int main(int argc, char *argv[])
     uint32_t last_hold_ms = 0;
     uint32_t pin_last_input = SDL_GetTicks();
     uint32_t last_remaining_poll = SDL_GetTicks();
+    uint32_t last_battery_poll = SDL_GetTicks();
     uint32_t timesup_since = 0; // ticks when the Time's up screen appeared
 
     while (!quit) {
@@ -1301,6 +1437,16 @@ int main(int argc, char *argv[])
             last_remaining_poll = ticks;
             int prev_remaining = remaining;
             remaining = readRemaining();
+
+            // Re-read the battery every ~30 s so the kid screen's chip
+            // doesn't sit on a startup value all session
+            if (ticks - last_battery_poll > BATTERY_POLL_MS) {
+                last_battery_poll = ticks;
+                int prev_battery = batteryPercentage();
+                batteryInvalidate();
+                if (batteryPercentage() != prev_battery)
+                    dirty = true;
+            }
 
             if (active_screen != SCREEN_PIN) {
                 if (remaining == 0 && active_screen != SCREEN_TIMESUP) {

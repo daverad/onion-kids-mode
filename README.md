@@ -6,7 +6,9 @@ use it unsupervised — big box art, one-button play, a PIN-protected exit,
 and an optional play timer.
 
 - **Boots straight into a kid-proof carousel** showing only your ★ favorited
-  games: box art, big label, left/right to browse, **A** to play.
+  games: box art, big label, left/right to browse, **A** to play, **X** to
+  start over. Long titles wrap onto a second line, and the battery level
+  sits in the corner alongside the play-time chip.
 - **Native Onion look**: every screen renders through Onion's own theme
   engine — your active theme's background, fonts, colors, header/footer
   bars, button hints and full-width list rows — so Kids Mode feels like
