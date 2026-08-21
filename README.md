@@ -7,8 +7,9 @@ and an optional play timer.
 
 - **Boots straight into a kid-proof carousel** showing only your ★ favorited
   games: box art, big label, left/right to browse, **A** to play, **X** to
-  start over. Long titles wrap onto a second line, and the battery level
-  sits in the corner alongside the play-time chip.
+  start over. Long titles wrap onto a second line, and the battery sits
+  top right exactly as it does everywhere else in Onion, with the
+  play-time chip opposite it.
 - **Native Onion look**: every screen renders through Onion's own theme
   engine — your active theme's background, fonts, colors, header/footer
   bars, button hints and full-width list rows — so Kids Mode feels like
@@ -52,7 +53,7 @@ and an optional play timer.
 
 | ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
 | :--: | :--: | :--: |
-| *The kid's carousel — one favorite at a time, box art and all; **A** plays, **X** starts over* | *Parent menu — play time with a live preview in the header, brightness, auto-resume and change PIN* | *The PIN gate — set once when arming; **A** confirms*
+| *The kid's carousel — one favorite at a time, box art and all; **A** plays, **X** starts over* | *Parent menu — play time with a live preview in the header, brightness, auto-resume and change PIN* | *The PIN gate — set once when arming; **A** confirms* |
 
 *(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
 your device uses.)*
