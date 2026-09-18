@@ -19,6 +19,10 @@
 //            "MENU" \n "NOTIMER"                (turn the play timer off)
 //            "TIMER" \n <minutes>               (--pick-timer mode)
 //            "MENU" \n "CHANGEPIN"               (set a new PIN)
+//            "MENU" \n "ADDKID"                  (add a child)
+//            "MENU" \n "SWITCHKID"               (hand over to another child)
+//            "KID" \n <name>                    (--pick-kid mode)
+//            "KEYBOARD" \n <text>               (--keyboard mode)
 //   exit 7:  "POWEROFF"  (Time's up screen sat idle for 5 minutes)
 //   exit 1:  canceled / error / nothing selected (result file removed)
 //
@@ -41,14 +45,24 @@
 //   kidui --set-pin -t "..." [--notice "..."]
 //                                  PIN entry only (for initial PIN setup)
 //   kidui --parent-menu --remaining S [--brightness P] [--autoresume 0|1]
+//                      [--kid "Ada" --kid "Bea"]
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
 //                                  picks 5-120 min, A/START applies, and the
 //                                  info line previews the new remaining time.
+//                                  The --kid roster is only used to decide
+//                                  whether "Switch to another kid" has anywhere to go.
 //   kidui --pick-timer [--no-off] -t "..."
 //                                  minutes picker; with --no-off B cancels
 //                                  (exit 1) instead of choosing 0
+//   kidui --pick-kid --kid "Ada" --kid "Bea" [--last-kid "Ada"]
+//                                  which child is playing this session;
+//                                  the shell only asks when more than
+//                                  one child exists
+//   kidui --keyboard -t "..."      text entry on Onion's own on-screen
+//                                  keyboard; exit 5 + "KEYBOARD" \n <text>,
+//                                  or exit 1 if canceled/left empty
 //
 // Play timer: kid_mode_loop.sh's ticker writes the remaining seconds to
 // /tmp/kidmode_remaining. The carousel shows it as a small chip and flips
@@ -68,6 +82,7 @@
 #include <unistd.h>
 
 #include "components/JsonGameEntry.h"
+#include "components/kbinput_wrapper.h" // launch_keyboard (libkbinput)
 #include "components/list.h"
 #include "system/battery.h"
 #include "system/keymap_sw.h"
@@ -87,6 +102,7 @@
 #define SYSTEM_JSON "/mnt/SDCARD/system.json"
 
 #define MAX_GAMES 100
+#define MAX_KIDS 32
 #define PIN_LEN 4
 #define UNLOCK_HOLD_MS 3000
 #define UNLOCK_BAR_SHOW_MS 800
@@ -110,16 +126,19 @@ typedef enum { SCREEN_CAROUSEL,
                SCREEN_TIMESUP,
                SCREEN_MENU,
                SCREEN_PICKTIMER,
+               SCREEN_PICKKID,
                SCREEN_CONFIRM_RESTART } Screen;
 
 #define MENU_UNLOCK 0
 #define MENU_ADDTIME 1
 #define MENU_NOTIMER 2
-#define MENU_BRIGHTNESS 3
-#define MENU_AUTORESUME 4
-#define MENU_CHANGEPIN 5
-#define MENU_BACK 6
-#define MENU_ROWS 7
+#define MENU_SWITCHKID 3
+#define MENU_ADDKID 4
+#define MENU_BRIGHTNESS 5
+#define MENU_AUTORESUME 6
+#define MENU_CHANGEPIN 7
+#define MENU_BACK 8
+#define MENU_ROWS 9
 #define TIMER_STEP 5
 #define TIMER_MAX 120
 // Brightness is picked in 10% steps and never goes fully dark (min 10%).
@@ -149,6 +168,12 @@ static double nowMs(void)
 }
 
 static double t_start = 0;
+
+// Child names for --pick-kid, passed in as --kid arguments: the roster
+// is the set of Saves/KidsProfile.<name> folders on the card, which the
+// shell is already reading, so kidui never touches the save layout.
+static char kid_names[MAX_KIDS][STR_MAX];
+static int kids_count = 0;
 
 static JsonGameEntry games[MAX_GAMES];
 static int games_count = 0;
@@ -545,25 +570,40 @@ static SDL_Surface *restartIcon(void)
         return icon_restart;
     icon_restart_tried = true;
 
-    SDL_Surface *raw = IMG_Load(RESTART_ICON_PATH);
-    if (raw == NULL)
-        return NULL;
-#ifdef PLATFORM_MIYOOMINI
-    // Same loader quirk the box art works around: images come back
-    // 180°-rotated relative to text. scaleSurface also normalises to
-    // 32-bit ARGB, which rotate180InPlace relies on.
-    SDL_Surface *normalized = scaleSurface(raw, raw->w, raw->h);
-    if (normalized != NULL) {
-        SDL_FreeSurface(raw);
-        raw = normalized;
-    }
-    rotate180InPlace(raw);
-#endif
-    icon_restart = SDL_DisplayFormatAlpha(raw);
+    // Loaded the way the theme loads its own A and B hints (theme_loadImage
+    // in common/theme/load.h): straight from IMG_Load, scaled only when the
+    // display is, and nothing else.
+    //
+    // This used to borrow the box-art path instead — rotate 180 degrees,
+    // rescale, SDL_DisplayFormatAlpha — and came out sitting on a solid
+    // block while the theme's A button next to it was transparent. The
+    // rotation was never needed: it compensates for a loader quirk on the
+    // box-art path, and a letter X is symmetrical under 180 degrees, so it
+    // looked right either way and hid the conversion that was costing the
+    // alpha.
+    icon_restart = IMG_Load(RESTART_ICON_PATH);
     if (icon_restart == NULL)
-        icon_restart = raw;
-    else
-        SDL_FreeSurface(raw);
+        return NULL;
+
+    // Sized against the theme's own A button rather than against the
+    // display, so the two hints sit side by side at the same size whatever
+    // theme is active — themes ship these at different sizes, and this one
+    // is deliberately larger than any of them so it scales down, which
+    // stays sharp, rather than up.
+    SDL_Surface *button_a = resource_getSurface(BUTTON_A);
+    int target_h = button_a != NULL ? button_a->h : (int)(32.0 * g_scale);
+    if (target_h > 0 && icon_restart->h > 0 && target_h != icon_restart->h) {
+        SDL_Surface *scaled = scaleSurface(
+            icon_restart, icon_restart->w * target_h / icon_restart->h,
+            target_h);
+        if (scaled != NULL) {
+            SDL_FreeSurface(icon_restart);
+            icon_restart = scaled;
+        }
+    }
+
+    // Belt and braces: whatever the surface came from, blit it blended.
+    SDL_SetAlpha(icon_restart, SDL_SRCALPHA, 255);
     return icon_restart;
 }
 
@@ -827,6 +867,19 @@ static void renderMenu(List *list, int remaining)
     theme_renderFooterStatus(screen, list->active_pos + 1, list->item_count);
 }
 
+// Same native list as the parent menu: one row per child, so a roster too
+// long for the screen scrolls for free and looks like the rest of Onion.
+static void renderPickKid(List *list)
+{
+    renderBase();
+    theme_renderHeader(screen, "Who's playing?", false);
+    theme_renderHeaderBattery(screen, batteryPercentage());
+    theme_renderList(screen, list);
+    theme_renderFooter(screen);
+    theme_renderStandardHint(screen, "OK", "CANCEL");
+    theme_renderFooterStatus(screen, list->active_pos + 1, list->item_count);
+}
+
 static void renderPin(const char *title, bool show_intro)
 {
     renderBase();
@@ -963,6 +1016,9 @@ int main(int argc, char *argv[])
     bool set_pin_mode = false;
     bool menu_mode = false;
     bool pick_timer_mode = false;
+    bool keyboard_mode = false;
+    bool pick_kid_mode = false;
+    char last_kid[STR_MAX] = ""; // roster entry to open the picker on
     bool picker_no_off = false;
     bool start_on_pin = false;
     int menu_timer_minutes = 0;
@@ -980,6 +1036,18 @@ int main(int argc, char *argv[])
             menu_mode = true;
         else if (strcmp(argv[i], "--pick-timer") == 0)
             pick_timer_mode = true;
+        else if (strcmp(argv[i], "--keyboard") == 0)
+            keyboard_mode = true;
+        else if (strcmp(argv[i], "--pick-kid") == 0)
+            pick_kid_mode = true;
+        else if (strcmp(argv[i], "--kid") == 0 && i + 1 < argc) {
+            if (kids_count < MAX_KIDS)
+                strncpy(kid_names[kids_count++], argv[++i], STR_MAX - 1);
+            else
+                i++; // roster longer than the screen could ever show
+        }
+        else if (strcmp(argv[i], "--last-kid") == 0 && i + 1 < argc)
+            strncpy(last_kid, argv[++i], STR_MAX - 1);
         else if (strcmp(argv[i], "--no-off") == 0)
             picker_no_off = true;
         else if (strcmp(argv[i], "--start-pin") == 0)
@@ -1011,6 +1079,12 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // A picker with nothing to pick is a caller bug, not a screen to put in
+    // front of a parent — and the shell only asks when two or more children
+    // exist. Fail before SDL comes up rather than drawing an empty list.
+    if (pick_kid_mode && kids_count == 0)
+        return 1;
+
     if (menu_timer_minutes < 0)
         menu_timer_minutes = 0;
     if (menu_timer_minutes > TIMER_MAX)
@@ -1025,6 +1099,35 @@ int main(int argc, char *argv[])
     if (!SDL_InitDefault())
         return 1;
     fprintf(stderr, "kidui: sdl ready at %.0f ms\n", nowMs() - t_start);
+
+    // Text entry (child names) runs on the on-screen keyboard MainUI uses
+    // for game search and WiFi passwords, rather than a hand-rolled one, so
+    // the screen matches the rest of the system. libkbinput is resolved on
+    // the device from the LD_LIBRARY_PATH runtime.sh exports, the same way
+    // libSDL_rotozoom.so already is — both live in Onion's .tmp_update/lib.
+    // Nothing else here needs drawing, so the keyboard runs and exits.
+    if (keyboard_mode) {
+        // Breadcrumbs either side of the call: libkbinput is resolved
+        // lazily, so a device whose Onion ships a version without
+        // launch_keyboard kills the process here rather than at startup,
+        // and the two lines are what tells that apart from an empty answer.
+        fprintf(stderr, "kidui: keyboard requested\n");
+        const char *entered = launch_keyboard(
+            "", strlen(pin_title) > 0 ? pin_title : "Enter a name");
+        fprintf(stderr, "kidui: keyboard returned %s\n",
+                entered == NULL ? "(null)" : entered[0] == '\0' ? "(empty)"
+                                                                : "text");
+        // Canceled or left empty: no result file, exactly like every other
+        // screen that the parent backs out of
+        int kb_rc = 1;
+        if (entered != NULL && entered[0] != '\0') {
+            writeResult("KEYBOARD", entered, NULL);
+            kb_rc = 5;
+        }
+        TTF_Quit();
+        SDL_Quit();
+        return kb_rc;
+    }
 
     // Theme fonts: header/list/hint come straight from the active theme via
     // resource_getFont; these two are the same families at kid-friendly sizes
@@ -1065,6 +1168,18 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list, (ListItem){.label = "Turn off timer",
                                         .item_type = ACTION,
                                         .disabled = menu_remaining < 0});
+    // Who is playing sits with the other session controls: it is a
+    // hand-over, not a setting. Faded with fewer than two profiles, where
+    // there is nobody to switch to.
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Switch to another kid",
+                            .item_type = ACTION,
+                            .disabled = kids_count < 2});
+    // Creates the profile and nothing else — adding a kid and handing the
+    // device over are separate intentions, and the row above is the one
+    // that ends someone's turn.
+    list_addItem(&menu_list,
+                 (ListItem){.label = "Add another kid", .item_type = ACTION});
     list_addItem(&menu_list,
                  (ListItem){.label = "Brightness",
                             .item_type = MULTIVALUE,
@@ -1073,7 +1188,7 @@ int main(int argc, char *argv[])
                             .value = menu_bright / LEVEL_STEP,
                             .value_formatter = formatBrightness});
     // Skip the carousel on boot and drop straight back into the last game
-    // the kid played. Reported the instant it is flipped (writeAutoResume),
+    // this kid played. Reported the instant it is flipped (writeAutoResume),
     // not on a menu action.
     list_addItem(&menu_list, (ListItem){.label = "Auto-resume last game",
                                         .item_type = MULTIVALUE,
@@ -1086,11 +1201,30 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list,
                  (ListItem){.label = "Back", .item_type = ACTION});
 
+    // Child picker, built only when asked for: one row per name, opened on
+    // whoever played last so the common case is a single button press.
+    List kid_list = {0};
+    bool kid_list_created = false;
+    if (pick_kid_mode && kids_count > 0) {
+        kid_list = list_create(kids_count, LIST_SMALL);
+        kid_list_created = true;
+        for (int i = 0; i < kids_count; i++) {
+            ListItem row = {.item_type = ACTION};
+            strncpy(row.label, kid_names[i], STR_MAX - 1);
+            list_addItem(&kid_list, row);
+            if (strcmp(kid_names[i], last_kid) == 0)
+                kid_list.active_pos = i;
+        }
+    }
+
     if (set_pin_mode) {
         active_screen = SCREEN_PIN;
     }
     else if (menu_mode) {
         active_screen = SCREEN_MENU;
+    }
+    else if (pick_kid_mode) {
+        active_screen = SCREEN_PICKKID;
     }
     else if (pick_timer_mode) {
         active_screen = SCREEN_PICKTIMER;
@@ -1234,6 +1368,36 @@ int main(int argc, char *argv[])
                     break;
                 }
             }
+            else if (active_screen == SCREEN_PICKKID) {
+                switch (changed_key) {
+                case SW_BTN_UP:
+                case SW_BTN_LEFT:
+                    list_keyUp(&kid_list, false);
+                    dirty = true;
+                    break;
+                case SW_BTN_DOWN:
+                case SW_BTN_RIGHT:
+                    list_keyDown(&kid_list, false);
+                    dirty = true;
+                    break;
+                case SW_BTN_A:
+                case SW_BTN_START:
+                    writeResult("KID",
+                                kid_list.items[kid_list.active_pos].label,
+                                NULL);
+                    exit_code = 5;
+                    quit = true;
+                    break;
+                case SW_BTN_B:
+                    // Backing out here aborts the arm: the shell treats a
+                    // plain cancel differently from kidui failing to start
+                    exit_code = 1;
+                    quit = true;
+                    break;
+                default:
+                    break;
+                }
+            }
             else if (active_screen == SCREEN_MENU) {
                 switch (changed_key) {
                 case SW_BTN_UP:
@@ -1296,6 +1460,16 @@ int main(int argc, char *argv[])
                     }
                     else if (menu_list.active_pos == MENU_CHANGEPIN) {
                         writeResult("MENU", "CHANGEPIN", NULL);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_SWITCHKID) {
+                        writeResult("MENU", "SWITCHKID", NULL);
+                        exit_code = 5;
+                        quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_ADDKID) {
+                        writeResult("MENU", "ADDKID", NULL);
                         exit_code = 5;
                         quit = true;
                     }
@@ -1367,6 +1541,7 @@ int main(int argc, char *argv[])
 
         // SELECT+START held: parent unlock gesture (any kid-facing screen)
         if (!set_pin_mode && !menu_mode && !pick_timer_mode &&
+            !pick_kid_mode &&
             active_screen != SCREEN_PIN) {
             bool combo_held = keystate[SW_BTN_SELECT] != RELEASED &&
                               keystate[SW_BTN_START] != RELEASED;
@@ -1409,6 +1584,7 @@ int main(int argc, char *argv[])
 
         // Poll the play-timer file and switch screens on expiry/refill
         if (!set_pin_mode && !menu_mode && !pick_timer_mode &&
+            !pick_kid_mode &&
             ticks - last_remaining_poll > REMAINING_POLL_MS) {
             last_remaining_poll = ticks;
             int prev_remaining = remaining;
@@ -1482,6 +1658,9 @@ int main(int argc, char *argv[])
             case SCREEN_PICKTIMER:
                 renderPickTimer(pin_title, menu_timer_minutes, picker_no_off);
                 break;
+            case SCREEN_PICKKID:
+                renderPickKid(&kid_list);
+                break;
             case SCREEN_CONFIRM_RESTART:
                 renderConfirmRestart(games[current].label, remaining);
                 break;
@@ -1509,6 +1688,8 @@ int main(int argc, char *argv[])
     if (font_info != NULL)
         TTF_CloseFont(font_info);
     list_free(&menu_list);
+    if (kid_list_created)
+        list_free(&kid_list);
     resources_free();
 
     // NB: deliberately no final clear+flip here — an extra page flip on the

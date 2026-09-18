@@ -25,12 +25,16 @@ miyoodir=/mnt/SDCARD/miyoo
 appdir=/mnt/SDCARD/App/KidsMode
 
 kidui_bin="$appdir/bin/kidui"
-configfile="$appdir/kidmode.json"
-flagfile=/mnt/SDCARD/.kidmode
+configfile="${configfile:-$appdir/kidmode.json}"
+: "${flagfile:=/mnt/SDCARD/.kidmode}"
 favfile=/mnt/SDCARD/Roms/favourite.json
 # Backups and state live OUTSIDE the app folder so that replacing
 # App/KidsMode during an update can never delete them.
-backupdir=/mnt/SDCARD/Saves/kidmode
+# This and the handful of other roots above are overridable so
+# tests/profile_test.sh can drive the save isolation against a fixture
+# directory; on the device they are always the card paths shown.
+: "${saves_dir:=/mnt/SDCARD/Saves}"
+: "${backupdir:=$saves_dir/kidmode}"
 
 racfg=/mnt/SDCARD/RetroArch/.retroarch/retroarch.cfg
 rabackup="$backupdir/retroarch.cfg.backup"
@@ -40,8 +44,7 @@ keymapbackup="$backupdir/keymap.json.backup"
 keymapnone="$backupdir/keymap-was-absent"
 blfscript=/mnt/SDCARD/.tmp_update/script/blue_light.sh
 blfbackup="$backupdir/blue_light.sh.backup"
-last_game_file="$backupdir/last_game.txt"
-logfile=/mnt/SDCARD/.tmp_update/logs/kidmode.log
+: "${logfile:=/mnt/SDCARD/.tmp_update/logs/kidmode.log}"
 
 timer_state="$backupdir/timer_state.txt" # 3 lines: day / used seconds / bonus seconds
 # The PIN also lives in kidmode.json inside the app folder, which an app
@@ -532,18 +535,173 @@ restore_blf_lock() {
 # and lists/ untouched and shared throughout.
 #
 # The kid's own save progress should persist across sessions — so instead of
-# a throwaway park each time, Kids Mode keeps its own permanent
-# Saves/KidsProfile (holding just these three subfolders) that's swapped in
-# at arm time and swapped back out (keeping whatever was added) at disarm,
-# while whatever was there before (from Main or Guest — we don't need to
-# know which) is parked untouched in between. A plain directory rename
-# can't partially fail or leave mismatched data the way editing files in
-# place could.
-current_profile=/mnt/SDCARD/Saves/CurrentProfile
-kids_profile=/mnt/SDCARD/Saves/KidsProfile
+# a throwaway park each time, Kids Mode keeps its own permanent profile
+# (holding just these three subfolders) that's swapped in at arm time and
+# swapped back out (keeping whatever was added) at disarm, while whatever
+# was there before (from Main or Guest — we don't need to know which) is
+# parked untouched in between. A plain directory rename can't partially
+# fail or leave mismatched data the way editing files in place could.
+#
+# Two or more children get one profile each: Saves/KidsProfile.<name>. The
+# roster IS the set of those folders — there is no list to keep in step
+# with what's on the card, nothing for an app update to wipe (kidmode.json
+# lives in the app folder, which updates replace), and a parent with the
+# card in a computer can add or remove a child by making or deleting a
+# folder.
+#
+# A plain Saves/KidsProfile with no named siblings is the unnamed
+# single-child setup: what a fresh install becomes and what every install
+# from before multi-child already is. It stays exactly that — no picker, no
+# extra screen, byte-for-byte the old behaviour — until a second child is
+# added, which is the point at which the first one finally needs a name
+# (see add_kid).
+current_profile="$saves_dir/CurrentProfile"
+legacy_kids_profile="$saves_dir/KidsProfile"
+kids_profile_prefix="$saves_dir/KidsProfile."
 isolated_subdirs="saves states romScreens"
 
+# Which child the armed session belongs to. Written at arm and read back at
+# disarm — which is often a DIFFERENT run of this script, because the boot
+# hook re-enters cmd_run after a reboot mid-session, so a shell variable
+# would not survive to see it. Reading this wrong at disarm would tip one
+# child's saves into another child's profile, so it is never guessed at:
+# see restore_target_profile.
+active_kid_file="$backupdir/active_kid.txt"
+
+# Names become folder names on a FAT32 card and are typed by a parent on an
+# on-screen keyboard. Keep to what is unambiguous there: no separators or
+# wildcards, nothing that could climb out of Saves/, and no leading or
+# trailing space to make two folders look identical in the picker.
+kid_name_max=24
+
+valid_kid_name() {
+    _vk="$1"
+    [ -n "$_vk" ] || return 1
+    [ "${#_vk}" -le "$kid_name_max" ] || return 1
+    case "$_vk" in
+        ' '* | *' ') return 1 ;;
+        *[!A-Za-z0-9_\ -]*) return 1 ;;
+    esac
+    return 0
+}
+
+lower_case() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+
+# One name per line, in folder order (alphabetical). A folder whose name
+# wouldn't pass validation was made by hand and can't be trusted as a path,
+# so it is skipped rather than offered.
+kid_roster() {
+    for _kr in "$kids_profile_prefix"*; do
+        [ -d "$_kr" ] || continue
+        _kr="${_kr##*/}"
+        _kr="${_kr#KidsProfile.}"
+        valid_kid_name "$_kr" || continue
+        printf '%s\n' "$_kr"
+    done
+}
+
+kid_count() { kid_roster | wc -l | tr -d ' '; }
+
+# FAT32 folder names are case-insensitive, so "ada" and "Ada" are one
+# folder — accepting both would put a child in the picker twice.
+kid_exists() {
+    _ke_want="$(lower_case "$1")"
+    for _ke in "$kids_profile_prefix"*; do
+        [ -d "$_ke" ] || continue
+        _ke="${_ke##*/}"
+        _ke="${_ke#KidsProfile.}"
+        [ "$(lower_case "$_ke")" = "$_ke_want" ] && return 0
+    done
+    return 1
+}
+
+# First "<stem> N" nobody is using, for the two cases where the code has to
+# invent a name rather than lose track of a child's saves.
+unused_kid_name() {
+    _un_n=1
+    while :; do
+        _un="$1 $_un_n"
+        [ -e "$kids_profile_prefix$_un" ] || break
+        _un_n=$((_un_n + 1))
+    done
+    printf '%s\n' "$_un"
+}
+
+set_active_kid() {
+    mkdir -p "$backupdir"
+    printf '%s\n' "$1" > "$active_kid_file"
+    sync
+}
+
+# Which game the carousel opens on, and what auto-resume picks up, belong to
+# the child whose session it is — so they live in that child's own profile
+# rather than in the shared state beside the timer and the PIN backup. Kept
+# at the profile root, which the isolation never touches: it only ever moves
+# the three subfolders.
+last_game_file() { printf '%s\n' "$(active_kids_profile)/last_game.txt"; }
+
+# Versions before per-kid profiles kept one shared last_game.txt beside the
+# timer state. The only kid it can belong to is whoever is playing now, so
+# move it into their profile rather than drop them at the front of the
+# carousel for a session. Runs once: afterwards there is nothing to move.
+migrate_shared_last_game() {
+    _msl="$backupdir/last_game.txt"
+    [ -f "$_msl" ] || return 0
+    if [ -f "$(last_game_file)" ]; then
+        rm -f "$_msl" # this kid already has their own; the old one is stale
+        return 0
+    fi
+    mkdir -p "$(active_kids_profile)"
+    mv "$_msl" "$(last_game_file)" 2> /dev/null &&
+        log "Moved the last-played game into this kid's own profile."
+}
+
+get_active_kid() {
+    [ -f "$active_kid_file" ] || return 1
+    _ak="$(sed -n 1p "$active_kid_file")"
+    [ -n "$_ak" ] || return 1
+    valid_kid_name "$_ak" || return 1
+    printf '%s\n' "$_ak"
+}
+
+# Where this session's saves come from at arm.
+active_kids_profile() {
+    if _akp="$(get_active_kid)"; then
+        printf '%s\n' "$kids_profile_prefix$_akp"
+    else
+        printf '%s\n' "$legacy_kids_profile"
+    fi
+}
+
+# Where they go back to at disarm. The pointer is written at every arm, so:
+#   a name        -> that child
+#   empty         -> the unnamed single-child profile, chosen deliberately
+#   missing       -> armed by a version that had no children: same thing
+#   anything else -> something corrupted it. The one thing we must not do
+#                    is pick a child and merge two children's saves, so it
+#                    goes to a name nobody is using and the log says so.
+#                    Nothing is lost; the parent can move it from a computer.
+restore_target_profile() {
+    if [ ! -f "$active_kid_file" ]; then
+        printf '%s\n' "$legacy_kids_profile"
+        return 0
+    fi
+    _rt="$(sed -n 1p "$active_kid_file")"
+    if [ -z "$_rt" ]; then
+        printf '%s\n' "$legacy_kids_profile"
+        return 0
+    fi
+    if valid_kid_name "$_rt"; then
+        printf '%s\n' "$kids_profile_prefix$_rt"
+        return 0
+    fi
+    _rt="$(unused_kid_name Recovered)"
+    log "active_kid.txt is unreadable — parking this session's saves as '$_rt' rather than guessing which child they belong to."
+    printf '%s\n' "$kids_profile_prefix$_rt"
+}
+
 apply_profile_isolation() {
+    kids_profile="$(active_kids_profile)"
     mkdir -p "$kids_profile" "$current_profile" "$backupdir"
     for d in $isolated_subdirs; do
         rm -rf "$backupdir/profile-parked-$d"
@@ -556,10 +714,19 @@ apply_profile_isolation() {
             mkdir -p "$current_profile/$d"
         fi
     done
-    log "Switched to the kid's own saves/states/thumbnails for this session."
+    _api_who="$(get_active_kid)" || _api_who=""
+    if [ -n "$_api_who" ]; then
+        log "Switched to $_api_who's own saves/states/thumbnails for this session."
+    else
+        log "Switched to the kid's own saves/states/thumbnails for this session."
+    fi
 }
 
+# $1 (optional) = the profile to put the saves back into. Only the
+# mid-session hand-over passes it, because by then the session pointer
+# already names the child taking over rather than the one finishing.
 restore_profile_isolation() {
+    kids_profile="${1:-$(restore_target_profile)}"
     mkdir -p "$kids_profile"
     for d in $isolated_subdirs; do
         rm -rf "$kids_profile/$d"
@@ -572,6 +739,69 @@ restore_profile_isolation() {
     done
     sync
     log "Restored the previous saves/states/thumbnails."
+}
+
+# --------------------------- the roster ------------------------------------
+
+legacy_profile_has_data() {
+    for _lp in $isolated_subdirs; do
+        [ -d "$legacy_kids_profile/$_lp" ] || continue
+        [ -n "$(ls -A "$legacy_kids_profile/$_lp" 2> /dev/null)" ] && return 0
+    done
+    return 1
+}
+
+# The unnamed profile becomes a named one as soon as a second child exists,
+# or the first child's saves would sit in a folder the picker can't offer —
+# which is how you orphan a year of progress.
+#
+# Safe to do mid-session: while armed, the three isolated folders live in
+# CurrentProfile, so the folder being renamed holds no save data at all.
+adopt_legacy_profile() {
+    valid_kid_name "$1" || return 1
+    _al="$kids_profile_prefix$1"
+    [ -e "$_al" ] && return 1
+    if [ -d "$legacy_kids_profile" ]; then
+        mv "$legacy_kids_profile" "$_al" || return 1
+    else
+        mkdir -p "$_al" || return 1
+    fi
+    # A session in progress is being played by this child, whatever they
+    # have just been called: point its disarm at the renamed folder.
+    if [ -f "$flagfile" ] && ! get_active_kid > /dev/null 2>&1; then
+        set_active_kid "$1"
+    fi
+    sync
+    log "The existing Kids Mode profile is now '$1'."
+}
+
+create_kid_profile() {
+    valid_kid_name "$1" || return 1
+    kid_exists "$1" && return 1
+    mkdir -p "$kids_profile_prefix$1" || return 1
+    sync
+    log "Added child '$1'."
+}
+
+# A card where someone made KidsProfile.<name> folders by hand can end up
+# with named children AND the old unnamed profile still holding a child's
+# saves, which the picker would never offer. Give those saves a name rather
+# than strand them; the parent can rename the folder from a computer.
+adopt_stranded_legacy() {
+    [ -d "$legacy_kids_profile" ] || return 0
+    [ "$(kid_count)" -gt 0 ] || return 0
+    if legacy_profile_has_data; then
+        _asl="$(unused_kid_name Player)"
+        adopt_legacy_profile "$_asl" || return 0
+        log "Saves were sitting in the old unnamed profile alongside named children; they are now '$_asl'."
+    else
+        # Empty leftover: tidy it away. rmdir refuses a folder with anything
+        # in it, so this can never take data with it.
+        for _lp in $isolated_subdirs; do
+            rmdir "$legacy_kids_profile/$_lp" 2> /dev/null
+        done
+        rmdir "$legacy_kids_profile" 2> /dev/null
+    fi
 }
 
 # ------------------------- MENU button override ----------------------------
@@ -1109,6 +1339,110 @@ ensure_fav_shortcut() {
     fi
 }
 
+# Parked folders still on the card at arm time mean a previous session never
+# disarmed — the flag file was deleted from a computer, say, which is the
+# lockout recovery the README documents. Arming straight over the top would
+# rm -rf the parent's parked saves and park the last kid's in their place,
+# losing the parent's for good. Put that session back first — which keeps
+# both sides — and then arm normally. Runs before the child is chosen, so
+# the pointer it reads is still the interrupted session's.
+recover_interrupted_session() {
+    for _ris in $isolated_subdirs; do
+        [ -d "$backupdir/profile-parked-$_ris" ] || continue
+        log "Found saves parked by a session that never unlocked; putting them back before arming."
+        restore_profile_isolation
+        return 0
+    done
+    return 0
+}
+
+# kidui gave no usable answer. Its stderr — in $uilog, which lives in /tmp
+# and is gone by the next boot — is the only evidence of why: a library it
+# could not resolve, a theme it could not load, a mode that exited early.
+# Fold the tail of it into the log on the card while it still exists,
+# otherwise a screen that "does nothing" leaves nothing behind to debug.
+log_ui_failure() {
+    log "$1 (kidui exit $2)"
+    [ -f "$uilog" ] || return 0
+    tail -n 8 "$uilog" 2> /dev/null | while IFS= read -r _lf; do
+        [ -n "$_lf" ] && log "  | $_lf"
+    done
+}
+
+# ---------------------------- child picker ---------------------------------
+# Shown at arm, just before the timer picker, when more than one child is on
+# the roster: pick who is playing and their saves become this session's.
+#
+# The "more than one" decision is made HERE rather than in kidui, so that a
+# single-child setup — which is every setup until a parent adds a second
+# child — goes straight to the timer picker with no extra screen, exactly as
+# it does today, and kidui never has to special-case an empty list.
+#
+# Returns 0 = chosen, 2 = the parent backed out, 1 = kidui never got that
+# far. Arming on a launcher that won't start leaves the device stuck at a
+# blank screen until the card comes out, so anything but a clean answer
+# aborts the arm — the same reason pick_session_timer is careful.
+
+pick_session_kid() {
+    adopt_stranded_legacy
+
+    _psk_count="$(kid_count)"
+    if [ "$_psk_count" -eq 0 ]; then
+        # No named children: the unnamed single-child profile, as before
+        set_active_kid ""
+        return 0
+    fi
+    if [ "$_psk_count" -eq 1 ]; then
+        set_active_kid "$(kid_roster)"
+        return 0
+    fi
+
+    # Names go across as arguments rather than through a file so a name with
+    # a space in it survives. set -- inside a function touches only the
+    # function's own arguments.
+    set --
+    while IFS= read -r _psk_name; do
+        [ -n "$_psk_name" ] || continue
+        set -- "$@" --kid "$_psk_name"
+    done <<EOF
+$(kid_roster)
+EOF
+    # Open on whoever played last. The pointer from the previous session is
+    # still on disk at this point — it is not rewritten until a child is
+    # chosen below — so it doubles as "last kid" with nothing extra to
+    # store. A key in kidmode.json would have been wiped by an app update,
+    # quietly moving the highlight to whoever sorts first.
+    _psk_last="$(get_active_kid)" || _psk_last=""
+    [ -n "$_psk_last" ] && set -- "$@" --last-kid "$_psk_last"
+
+    log "launcher: starting kidui (child picker)"
+    rm -f "$uiresult"
+    "$kidui_bin" --pick-kid "$@" > "$uilog" 2>&1
+    kidpicker_rc=$?
+    log_ui_timings
+
+    if [ "$kidpicker_rc" -eq 1 ]; then
+        rm -f "$uiresult"
+        return 2
+    fi
+    if [ "$kidpicker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "KID" ]; then
+        log_ui_failure "Child picker returned nothing" "$kidpicker_rc"
+        rm -f "$uiresult"
+        return 1
+    fi
+
+    _psk_picked="$(sed -n 2p "$uiresult")"
+    rm -f "$uiresult"
+    # The name came back out of a folder name we put in, but it is about to
+    # become a path again, so it is checked again on the way in
+    valid_kid_name "$_psk_picked" || return 1
+    kid_exists "$_psk_picked" || return 1
+
+    set_active_kid "$_psk_picked"
+    log "Playing as $_psk_picked this session."
+    return 0
+}
+
 # --------------------------- session timer picker --------------------------
 # Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 120 minutes
 # (default OFF; must match TIMER_MAX in src/kidsMode/kidui.c). Selecting a
@@ -1126,6 +1460,7 @@ pick_session_timer() {
     # missing libs), and arming on a launcher that won't start would leave
     # the device stuck, so bail out instead.
     if [ "$picker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "TIMER" ]; then
+        log_ui_failure "Timer picker returned nothing" "$picker_rc"
         rm -f "$uiresult"
         return 1
     fi
@@ -1160,6 +1495,158 @@ change_pin() {
     done
 }
 
+# ------------------------------ auto-resume --------------------------------
+# Opt in with "auto_resume_last_game": true in kidmode.json, or the parent
+# menu row: skip the carousel and go straight back into the last game this
+# kid played, like stock Onion's own auto-resume.
+#
+# The start of a session is the moment this applies — and a hand-over starts
+# a session for the kid taking over, so it applies there too. It used to sit
+# inline before the main loop, which meant the same setting sent the kid who
+# armed into their game and left the kid arriving mid-session on the
+# carousel.
+
+auto_resume_if_set() {
+    [ "$(config_get auto_resume_last_game)" = "true" ] || return 1
+    [ -f "$(last_game_file)" ] || return 1
+    [ "$(timer_remaining)" != "0" ] || return 1
+
+    lg_launch="$(sed -n 1p "$(last_game_file)")"
+    lg_rompath="$(sed -n 2p "$(last_game_file)")"
+    if [ -z "$lg_launch" ] || [ ! -f "$lg_launch" ] || [ ! -f "$lg_rompath" ]; then
+        log "auto_resume_last_game set but last game no longer exists; showing carousel."
+        rm -f "$(last_game_file)"
+        return 1
+    fi
+
+    log "auto-resuming last game: $lg_rompath"
+    build_game_cmd "$lg_launch" "$lg_rompath"
+    run_game_cmd
+}
+
+# ------------------------------ switch child -------------------------------
+# Hand the device to a sibling without leaving the launcher. Reaching the
+# parent menu already means no game is running — kidui has to exit to report
+# the PIN, and running a game is a different branch of the loop entirely —
+# so the profile folders are as idle here as they are at arm time, and the
+# hand-over is the same pair of directory renames arming does.
+#
+# The picker runs FIRST, before anything moves: a parent who backs out of it
+# leaves the session exactly as it was, with no window where the saves are
+# half-swapped. Returns 0 if a switch happened, 1 if not.
+
+switch_kid() {
+    _sk_from_profile="$(active_kids_profile)"
+    _sk_from="$(sed -n 1p "$active_kid_file" 2> /dev/null)"
+
+    pick_session_kid || {
+        # Canceled or kidui failed: put the pointer back and change nothing
+        printf '%s\n' "$_sk_from" > "$active_kid_file"
+        return 1
+    }
+
+    if [ "$(active_kids_profile)" = "$_sk_from_profile" ]; then
+        log "Hand-over canceled: same child chosen."
+        return 1
+    fi
+
+    # A fresh face gets a fresh budget — inheriting whatever the last child
+    # had left is a surprise nobody asked for
+    pick_session_timer || log "Hand-over: timer picker failed; keeping the current budget."
+
+    restore_profile_isolation "$_sk_from_profile"
+    apply_profile_isolation
+    log "Handed over to $(get_active_kid)."
+    # The kid taking over is starting a session, so the setting that skips
+    # the carousel is theirs to inherit too
+    auto_resume_if_set
+    return 0
+}
+
+# ------------------------------- add a child -------------------------------
+# Reached from the parent menu. Creates the child's profile and nothing
+# else: the menu runs mid-session, when the playing child's saves are live
+# inside CurrentProfile, and switching there would mean moving folders out
+# from under a running game. The new child becomes playable at the next arm.
+
+run_keyboard() {
+    rm -f "$uiresult"
+    # Onion's keyboard loads its key images from a RELATIVE path — RES_BASE
+    # is "res/" in SearchFilter's src/common/resource.hpp, the source the
+    # prebuilt libkbinput.so was built from — so they only resolve when the
+    # working directory is the one holding them, .tmp_update. Anywhere else
+    # the images load as nothing and the first blit segfaults, which is why
+    # this worked when Kids Mode was armed by the boot hook and died when it
+    # was armed from the Apps tab or after a game had run (both leave the
+    # launcher sitting in App/KidsMode). The subshell puts the working
+    # directory back where the loop expects it.
+    (cd "$sysdir" && "$kidui_bin" --keyboard -t "$1") > "$uilog" 2>&1
+    _rk=$?
+    if [ "$_rk" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "KEYBOARD" ]; then
+        # Not necessarily an error — the parent may simply have backed out —
+        # but it is indistinguishable from the keyboard failing to appear,
+        # so it is worth a line either way
+        log_ui_failure "Keyboard entry (\"$1\") returned nothing" "$_rk"
+        rm -f "$uiresult"
+        return 1
+    fi
+    sed -n 2p "$uiresult"
+    rm -f "$uiresult"
+}
+
+bad_name_panel() {
+    infoPanel -t "Kids Mode" -m "That name won't work.\nUse letters, numbers, spaces,\n- or _ (up to $kid_name_max)." --auto
+}
+
+add_kid() {
+    _ak_new="$(run_keyboard "Add a kid")" || return 1
+    if ! valid_kid_name "$_ak_new"; then
+        bad_name_panel
+        return 1
+    fi
+    if kid_exists "$_ak_new"; then
+        infoPanel -t "Kids Mode" -m "There is already a kid\ncalled $_ak_new." --auto
+        return 1
+    fi
+
+    # An existing single-child setup has an unnamed profile holding a real
+    # child's saves, and a second child is the moment that one needs a name
+    # too — otherwise their progress sits in a folder the picker can't
+    # offer. Ask for it AFTER the name the parent came here to type, so the
+    # first screen is the one the button promised, and say why a second name
+    # is wanted rather than leaving a keyboard title to explain it. Backing
+    # out here loses the name just typed, which is the price of creating
+    # nothing at all rather than half a roster.
+    _ak_first=""
+    if [ "$(kid_count)" -eq 0 ] && [ -d "$legacy_kids_profile" ]; then
+        infoPanel -t "Kids Mode" -m "$_ak_new gets their own saves.\n\nWhat's the name of the kid\nALREADY using Kids Mode?"
+        _ak_first="$(run_keyboard "Name the kid already playing")" || return 1
+        if ! valid_kid_name "$_ak_first"; then
+            bad_name_panel
+            return 1
+        fi
+        if [ "$(lower_case "$_ak_first")" = "$(lower_case "$_ak_new")" ]; then
+            infoPanel -t "Kids Mode" -m "Both kids can't be\ncalled $_ak_new." --auto
+            return 1
+        fi
+    fi
+
+    if [ -n "$_ak_first" ] && ! adopt_legacy_profile "$_ak_first"; then
+        infoPanel -t "Kids Mode" -m "Couldn't name the current\nprofile. Nothing was changed." --auto
+        return 1
+    fi
+    if ! create_kid_profile "$_ak_new"; then
+        infoPanel -t "Kids Mode" -m "Couldn't create a profile\nfor $_ak_new." --auto
+        return 1
+    fi
+
+    if [ -n "$_ak_first" ]; then
+        infoPanel -t "Kids Mode" -m "$_ak_first and $_ak_new are set up.\nUse Switch to another\nkid to choose who plays\nnext." --auto
+    else
+        infoPanel -t "Kids Mode" -m "$_ak_new added.\nUse Switch to another\nkid to hand over to\n$_ak_new." --auto
+    fi
+}
+
 # ------------------------------ parent menu --------------------------------
 # Shown after a correct PIN: exit Kids Mode, add/turn off play time, set the
 # max volume/brightness ceilings, flip auto-resume, or change the PIN. Value
@@ -1172,10 +1659,19 @@ parent_menu() {
         rm -f "$uiresult" "$autoresume_result" "$brightness_result"
         ar_val=0
         [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
+        # The roster only tells kidui whether the switch row has anywhere
+        # to go; the menu never reads the save layout itself.
+        set --
+        while IFS= read -r _pm_kid; do
+            [ -n "$_pm_kid" ] || continue
+            set -- "$@" --kid "$_pm_kid"
+        done <<EOF
+$(kid_roster)
+EOF
         "$kidui_bin" --parent-menu \
             --remaining "$(timer_remaining)" \
             --brightness "$(get_brightness_pct)" \
-            --autoresume "$ar_val" > "$uilog" 2>&1
+            --autoresume "$ar_val" "$@" > "$uilog" 2>&1
         menu_rc=$?
 
         # The toggle is written the instant the parent flips it (not
@@ -1238,6 +1734,17 @@ parent_menu() {
                 ;;
             CHANGEPIN)
                 change_pin
+                # Stay in the menu regardless of outcome
+                ;;
+            SWITCHKID)
+                # Switched: straight back to the launcher for the new child.
+                # Canceled: back to the menu the parent was standing in.
+                if switch_kid; then
+                    return 1
+                fi
+                ;;
+            ADDKID)
+                add_kid
                 # Stay in the menu regardless of outcome
                 ;;
             ADDTIME)
@@ -1326,21 +1833,8 @@ cmd_run() {
             log "resuming interrupted game"
             run_game_cmd
         fi
-    elif [ "$(config_get auto_resume_last_game)" = "true" ] &&
-        [ -f "$last_game_file" ] && [ "$(timer_remaining)" != "0" ]; then
-        # Opt in with "auto_resume_last_game": true in kidmode.json: skip
-        # the carousel on boot and go straight back into the last game the
-        # child played, like stock Onion's own auto-resume.
-        lg_launch="$(sed -n 1p "$last_game_file")"
-        lg_rompath="$(sed -n 2p "$last_game_file")"
-        if [ -n "$lg_launch" ] && [ -f "$lg_launch" ] && [ -f "$lg_rompath" ]; then
-            log "auto-resuming last game: $lg_rompath"
-            build_game_cmd "$lg_launch" "$lg_rompath"
-            run_game_cmd
-        else
-            log "auto_resume_last_game set but last game no longer exists; showing carousel."
-            rm -f "$last_game_file"
-        fi
+    else
+        auto_resume_if_set
     fi
 
     while [ -f "$flagfile" ]; do
@@ -1362,7 +1856,7 @@ cmd_run() {
 
         rm -f "$uiresult"
         select_rompath=""
-        [ -f "$last_game_file" ] && select_rompath="$(sed -n 2p "$last_game_file")"
+        [ -f "$(last_game_file)" ] && select_rompath="$(sed -n 2p "$(last_game_file)")"
         if [ "$no_pin_recovery" = "1" ] && [ -n "$pin_notice" ]; then
             "$kidui_bin" -t "Set a new PIN" --start-pin --notice "$pin_notice" > "$uilog" 2>&1
         elif [ "$no_pin_recovery" = "1" ]; then
@@ -1410,7 +1904,7 @@ cmd_run() {
                 # the fresh-start variant) so a future boot can auto-resume
                 # it if auto_resume_last_game is enabled.
                 mkdir -p "$backupdir"
-                printf '%s\n%s\n' "$sel_launch" "$sel_rompath" > "$last_game_file"
+                printf '%s\n%s\n' "$sel_launch" "$sel_rompath" > "$(last_game_file)"
                 run_game_cmd
                 ui_fails=0
                 ;;
@@ -1507,10 +2001,27 @@ cmd_arm() {
         return 1
     fi
 
+    recover_interrupted_session
+
+    pick_session_kid
+    case $? in
+        0) ;;
+        2)
+            infoPanel -t "Kids Mode" -m "Canceled.\nKids Mode was NOT armed." --auto
+            return 1
+            ;;
+        *)
+            infoPanel -t "Kids Mode" -m "Couldn't start the launcher.\nKids Mode was NOT armed." --auto
+            return 1
+            ;;
+    esac
+
     if ! pick_session_timer; then
         infoPanel -t "Kids Mode" -m "Couldn't start the launcher.\nKids Mode was NOT armed." --auto
         return 1
     fi
+
+    migrate_shared_last_game
 
     # Arming rewrites four files and moves three folders, then flushes once
     # at the end rather than after each step.
@@ -1527,6 +2038,11 @@ cmd_arm() {
 
     cmd_run
 }
+
+# tests/profile_test.sh sources this file to drive the save isolation
+# against a fixture directory instead of a card, so sourcing must not run a
+# command.
+[ "$kidmode_test" = "1" ] && return 0
 
 case "${1:-run}" in
     arm)

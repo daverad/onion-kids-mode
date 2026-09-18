@@ -35,10 +35,25 @@ jobs:
           make
           file kidui
           cp kidui "$GITHUB_WORKSPACE/App/KidsMode/bin/kidui"
-      # The App folder is also an install path: people clone the repo and copy
-      # it straight onto a card. Releases are always built from source, so the
-      # committed binary silently went stale — it sat two versions behind for
-      # months. Push the freshly built one back so the two can't diverge.
+      # kidui links Onion's on-screen keyboard (libkbinput) for child-name
+      # entry. Kids Mode installs as a standalone app rather than into an
+      # Onion build, so it can't ship Onion's lib directory — libkbinput.so
+      # has to resolve on the device from the LD_LIBRARY_PATH runtime.sh
+      # exports, which covers .tmp_update/lib, where Onion's root Makefile
+      # copies lib/. on install. kidui already depends on libSDL_rotozoom.so
+      # from that same directory, so the keyboard rides on an arrangement
+      # that has been working since v1. Assert the dependency is really
+      # there: a toolchain that quietly dropped it would ship a launcher
+      # whose "Add another kid" row crashes on a parent's device.
+      - name: Assert kidui links the on-screen keyboard
+        shell: bash
+        run: |
+          source /root/.bashrc
+          cd onion/src/kidsMode
+          dyn=$("${CROSS_COMPILE}readelf" -d kidui)
+          echo "$dyn" | grep -E 'NEEDED|PATH'
+          echo "$dyn" | grep -q 'NEEDED.*libkbinput\.so' || {
+            echo "::error::kidui does not link libkbinput.so"; exit 1; }
       - name: Commit the rebuilt binary
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'github-actions[bot]'
         shell: bash
@@ -62,6 +77,22 @@ jobs:
           name: KidsMode-app
           path: App
           if-no-files-found: error
+
+  tests:
+    name: Save-profile tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The device shell is busybox ash, so that is the one that decides
+      # whether this script is correct. dash runs too, as a second opinion
+      # on POSIX-ness that is already installed on the runner.
+      - name: busybox ash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox-static
+          busybox ash tests/profile_test.sh
+      - name: dash
+        run: dash tests/profile_test.sh
 
   release:
     name: Package release zip

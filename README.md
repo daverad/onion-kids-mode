@@ -26,8 +26,8 @@ and an optional play timer.
   play time right on the menu row — **◀ ▶** picks +5…+120 min,
   **A**/**START** applies, and the header previews the remaining time before
   and after — **turn the timer off entirely**, set the **screen
-  brightness**, flip **auto-resume**, or **change the PIN** — all without
-  leaving the launcher.
+  brightness**, flip **auto-resume**, **switch to another kid**, **add
+  another kid**, or **change the PIN** — all without leaving the launcher.
 - **Start over**: **X** on a game asks "Start over?" and launches from the
   beginning without touching in-game saves.
 - **MENU button in-game saves and exits** back to the carousel.
@@ -39,10 +39,14 @@ and an optional play timer.
   RetroArch and still works. Everything is restored from a backup on
   unlock.
 - **The kid gets their own saves**: while armed, `Saves/CurrentProfile`'s
-  `saves`, `states` and `romScreens` are swapped for a persistent
-  `Saves/KidsProfile`, so a child can't overwrite your save states or fill
-  the game switcher with their thumbnails — and their own progress is
-  still there next session. Per-core settings and themes stay shared.
+  `saves`, `states` and `romScreens` are swapped for a persistent kid
+  profile, so a child can't overwrite your save states or fill the game
+  switcher with their thumbnails — and their own progress is still there
+  next session. Per-core settings and themes stay shared.
+- **One profile per child**: add a child from the parent menu and each one
+  gets their own saves, save states and game-switcher thumbnails. With two
+  or more on the roster, arming asks who's playing before the timer; with
+  one, nothing changes and no extra screen appears.
 - **MENU+B blue-light toggle is disabled** while armed (any schedule you
   have configured still runs).
 - **Auto-resume** (optional): boot straight back into the last game the
@@ -80,9 +84,12 @@ welcome.
 1. **Arm:** Apps tab → **Kids Mode**. First time, set + confirm a 4-digit
    PIN (up/down changes a digit, left/right moves between digits,
    A confirms).
-2. Pick a session timer (OFF / 5–120 min) — the device switches straight
+2. If more than one child is set up, pick who's playing (**▲ ▼**, **A** to
+   choose — it opens on whoever played last). With one child this step
+   doesn't appear.
+3. Pick a session timer (OFF / 5–120 min) — the device switches straight
    into the kid launcher.
-3. Hand it over:
+4. Hand it over:
 
    | Button | Action |
    | ------ | ------ |
@@ -92,9 +99,10 @@ welcome.
    | MENU (in-game) | save and exit back to the carousel |
    | everything else | does nothing — no dead ends |
 
-4. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
-   *Exit Kids Mode / Add play time / Turn off timer / Brightness /
-   Auto-resume last game / Change PIN / Back*.
+5. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
+   *Exit Kids Mode / Add play time / Turn off timer / Switch to another
+   kid / Add another kid / Brightness / Auto-resume last game /
+   Change PIN / Back*.
    - **Add play time:** **◀ ▶** picks the amount (the header shows what the
      remaining time becomes), **A**/**START** applies — you drop straight
      back into the kid launcher.
@@ -109,10 +117,43 @@ welcome.
      carousel (it falls back to the carousel if that game is gone). The
      flip is saved the moment you make it, so **B** or *Back* both keep it.
    - **Change PIN:** set a new 4-digit PIN on the spot (no computer needed).
-5. **Time's up:** the kid sees a friendly "Time's up!" screen. If the
+6. **Time's up:** the kid sees a friendly "Time's up!" screen. If the
    device is left on there, it powers off by itself after 5 minutes.
 
 Kids Mode stays armed across reboots until you exit it via the PIN.
+
+## More than one child
+
+Each child gets their own `Saves/KidsProfile.<name>` folder holding their
+`saves`, `states` and `romScreens`. The folders *are* the roster: there is
+no list to keep in step with them, so you can add or remove a child from a
+computer by making or deleting a folder, and an app update can't lose them.
+
+- **Handing over to a sibling:** parent menu → **Switch to another kid**,
+  pick the name, pick a session time. The child finishing keeps everything
+  they did, the one taking over starts on their own saves, and you never
+  leave the launcher or see Onion's menus. The new session gets a fresh play
+  timer rather than inheriting whatever was left of the last one.
+- **Add a child:** parent menu → **Add another kid**, and type the name on
+  Onion's usual on-screen keyboard. It creates the profile only — the
+  session that's running keeps its own saves, so use **Switch to another
+  kid** when it's actually their turn.
+- **The first time you add a second child**, Kids Mode asks for that kid's
+  name and then for the name of the kid already playing — until now their
+  profile didn't need one. Their existing progress is kept as-is under the
+  name you give.
+- **Names** can use letters, numbers, spaces, `-` and `_`, up to 24
+  characters. They become folder names on the card, so anything else is
+  refused.
+- **The picker** lists children alphabetically and opens on whoever played
+  last, so the usual answer is one press of **A**. It appears when arming
+  and when switching, and only when there are two or more children.
+- **Favorites are shared.** Every child sees the same game list; it's the
+  saves, save states, thumbnails and last-played game that are separate —
+  each child's carousel opens where they left off.
+- **Renaming a child:** rename the `Saves/KidsProfile.<name>` folder from a
+  computer. **Removing one:** delete the folder — that deletes their saves
+  too, so copy it somewhere first if you might want it back.
 
 ## Settings
 
@@ -153,8 +194,12 @@ are unbound while armed and restored on unlock. If you *want* them back,
 set `lock_retroarch_hotkeys` to `false`.
 
 **Where did my save states go?** Nowhere — while armed, the kid plays on
-their own `Saves/KidsProfile` and yours are parked; exiting Kids Mode puts
-yours straight back. Both sides keep their progress.
+their own profile and yours are parked; exiting Kids Mode puts yours
+straight back. Both sides keep their progress.
+
+**Does Guest Mode still work?** Yes. Kids Mode parks whatever profile is
+current without needing to know whether it came from Main or Guest, so you
+can arm from either.
 
 ## PIN reset / recovery
 
@@ -179,14 +224,15 @@ or renamed:
 - **Blue-light toggle still dead:** copy `Saves/kidmode/blue_light.sh.backup`
   over `.tmp_update/script/blue_light.sh` (or delete the guard block at the
   top of that file, marked `KIDMODE_BLF_GUARD`).
-- **Saves look wrong after a crash mid-session:** the kid's are in
-  `Saves/KidsProfile/`, yours are parked in `Saves/kidmode/profile-parked-*`.
-  Move the parked folders back into `Saves/CurrentProfile/` to undo the swap
+- **Saves look wrong after a crash mid-session:** the kid's are in their
+  `Saves/KidsProfile*` folder, yours are parked in
+  `Saves/kidmode/profile-parked-*`. Arming again puts the parked ones back
+  first, or move them into `Saves/CurrentProfile/` yourself to undo the swap
   by hand.
 - **Uninstall:** delete `/App/KidsMode/`, `/.kidmode` (if present),
-  `/.tmp_update/startup/kidmode_boot.sh`, `/Saves/kidmode/` and
-  `/Saves/KidsProfile/` (that last one is the kid's save data — keep it if
-  you might re-arm later).
+  `/.tmp_update/startup/kidmode_boot.sh`, `/Saves/kidmode/` and every
+  `/Saves/KidsProfile*` folder (those last ones are the children's save
+  data — keep them if you might re-arm later).
 
 Fail-safes: if the launcher binary is missing or crashes repeatedly, Kids
 Mode disarms itself and boots normal Onion instead of brick-looping. A log
@@ -221,8 +267,23 @@ docker run --rm -v "$PWD/Onion":/root/workspace aemiii91/miyoomini-toolchain:lat
   /bin/bash -c "source /root/.bashrc; cd src/kidsMode && make"
 ```
 
+The toolchain image is published for `linux/amd64` only, so on an Apple
+Silicon Mac add `--platform linux/amd64` to the `docker run` — without it
+Docker stops with *no matching manifest for linux/arm64/v8*. It builds the
+same ARM binary either way; only the compiler is emulated.
+
 The GitHub workflow in this repo does the same on every push and attaches
 an install zip to tagged releases.
+
+The save-profile logic has tests that run against a fixture rather than a
+card, since the failure modes there cost someone real save data:
+
+```sh
+sh tests/profile_test.sh
+```
+
+CI runs them under busybox `ash`, which is the shell the device actually
+has.
 
 ## Credits & license
 
