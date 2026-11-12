@@ -68,12 +68,26 @@ and an optional play timer.
 
 ## Screenshots
 
-| ![The kid's carousel](docs/screenshots/carousel.png) | ![Parent menu](docs/screenshots/parent-menu.png) | ![PIN screen](docs/screenshots/pin.png) |
-| :--: | :--: | :--: |
-| *The kid's carousel — one favorite at a time, box art and all; **A** plays, **X** starts over* | *Parent menu — play time with a live preview in the header, brightness, auto-resume and change PIN* | *The PIN gate — set once when arming; **A** confirms* |
+| Child carousel | Daily allowance |
+| :--: | :--: |
+| ![Current Kids Mode carousel with a fictional sample game and 25 minutes remaining](docs/screenshots/carousel.png) | ![Parent menu with Daily allowance, 30 minutes each day and Bonus today](docs/screenshots/parent-menu.png) |
+| Favorites-only browsing and remaining time | Recurring limit and today's bonus |
 
-*(These screenshots show the earlier session-only interface with Onion's stock
-theme. Current timer controls are described below; Kids Mode uses your active theme.)*
+| Single session | Child selection |
+| :--: | :--: |
+| ![Parent menu with Single session selected and a 20-minute handoff budget](docs/screenshots/single-session.png) | ![Who's playing screen with sample profiles Alex and Sam](docs/screenshots/children.png) |
+| One handoff, with its own duration and extra time | Select the child's separate saves and Daily budget |
+
+| Daily time exhausted | Parent PIN |
+| :--: | :--: |
+| ![Time's up screen saying More time tomorrow](docs/screenshots/timesup.png) | ![Parent access PIN screen](docs/screenshots/pin.png) |
+| Daily play stays blocked until renewal or parent bonus | PIN-protected parent controls |
+
+Captured from the current C UI in a local ARM64 Linux/SDL preview on an Apple Silicon
+Mac, using the pinned Onion stock theme at 640×480. These are local renders, not
+photographs of a handheld. Names, battery level and timer values are sample inputs;
+“Sample Adventure” and its geometric cover are fictional. No commercial ROM or game
+artwork is used. Your active Onion theme supplies the device's appearance.
 
 ## Requirements
 
