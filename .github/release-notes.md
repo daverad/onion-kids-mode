@@ -10,6 +10,11 @@ This builds on whawker's multi-child profiles in #7. The save-recovery repair is
 separate commit: interrupted handoffs resume a checksummed transaction without
 replacing another child's saves. The core timer feature is squashed separately.
 
+A separate menu-audio commit uses Onion's active-theme navigation sound and standard
+fallback, respects menu/master sound settings, prevents overlapping cues, and closes
+the mixer before launching games. Background music remains separate. Operator
+testing confirmed navigation and game/menu audio handoff.
+
 ## Installation and clock support
 
 These are **unofficial, UNQUALIFIED candidate** archives, not a universal hardware

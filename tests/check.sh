@@ -30,6 +30,9 @@ elif [ "$mode" != quick ]; then
 fi
 # shellcheck disable=SC2086
 $cc $flags -I "$source" "$source/allowance.c" tests/allowance_test.c -o "$build/policy"
+# shellcheck disable=SC2086
+$cc $flags -I "$source" tests/menu_audio_test.c -o "$build/menu-audio"
+"$build/menu-audio"
 "$build/policy"
 [ "$mode" != quick ] || exit 0
 $cc --analyze -std=c11 -Xanalyzer -analyzer-output=text "$source/allowance.c" "$source/allowance_store.c" "$source/allowance_runtime.c" 2> "$build/analyzer.log"
@@ -39,6 +42,9 @@ export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 # shellcheck disable=SC2086
 $cc $flags $sanitizers -I "$source" "$source/allowance.c" tests/allowance_test.c -o "$build/policy-safe"
+# shellcheck disable=SC2086
+$cc $flags $sanitizers -I "$source" tests/menu_audio_test.c -o "$build/menu-audio-safe"
+"$build/menu-audio-safe"
 "$build/policy-safe"
 # shellcheck disable=SC2086
 $cc $flags $sanitizers -DALLOWANCE_STANDALONE -DALLOWANCE_TESTING "$source/allowance.c" "$source/allowance_store.c" "$source/allowance_runtime.c" -o "$build/runtime"

@@ -3,9 +3,9 @@ include ../common/config.mk
 
 TARGET = kidui
 KIDS_BUILD_SOURCE ?= unverified
-CFLAGS += -DKIDS_BUILD_SOURCE=\"$(KIDS_BUILD_SOURCE)\"
+CFLAGS += -DHAS_AUDIO -DKIDS_BUILD_SOURCE=\"$(KIDS_BUILD_SOURCE)\"
 
-LDFLAGS := $(LDFLAGS) -lSDL -lSDL_ttf -lSDL_image -lSDL_rotozoom -lm -pthread -lkbinput
+LDFLAGS := $(LDFLAGS) -lSDL -lSDL_ttf -lSDL_image -lSDL_mixer -lSDL_rotozoom -lm -pthread -lkbinput
 
 include ../common/commands.mk
 include ../common/recipes.mk

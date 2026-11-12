@@ -33,7 +33,7 @@ if len(binary) < 52 or binary[:6] != b'\x7fELF\x01\x01' or struct.unpack_from('<
 if inputs['sha256'].encode() + b'\0' not in binary:
     raise SystemExit('Binary was not built with this checked source fingerprint.')
 # DT_NEEDED names are verified by the pinned cross-build's readelf step.
-for dependency in (b'libSDL', b'libSDL_ttf', b'libSDL_image', b'libSDL_rotozoom', b'libkbinput.so'):
+for dependency in (b'libSDL', b'libSDL_ttf', b'libSDL_image', b'libSDL_mixer', b'libSDL_rotozoom', b'libkbinput.so'):
     if dependency not in binary:
         raise SystemExit(f'Missing dynamic dependency: {dependency!r}')
 commit = git('rev-parse', 'HEAD')

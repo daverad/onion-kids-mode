@@ -172,6 +172,22 @@ both profiles; launch/resume/start-over; zero-time save/exit; normal and keep-ru
 sleep; shutdown during sleep; date rollover/recovery; and rollback using the backup.
 This is testing the new accounting and data transitions, not a general emulator tour.
 
+### Theme menu sounds
+
+Navigation, confirm and back inputs use Onion's active-theme `sound/change.wav`,
+with Onion's standard sound as fallback. Menu volume (`bgmvol`), master zero volume
+and master mute are respected. Background-music mute remains separate; Kids Mode
+does not start background music. No Kids Mode sound preference is introduced.
+A missing/invalid sound or unavailable audio device leaves the menus usable silently.
+One channel prevents overlapping cues, and the mixer closes after input inactivity
+once the current sound ends. Audio closes before game launch; confirmation playback
+can delay that handoff by at most 100 milliseconds.
+
+Operator testing confirmed navigation and parent-menu sounds, game audio, and menu
+audio after returning from a game on November 12. The active theme had no custom
+change sound, so this exercised Onion's fallback. Theme selection, mute/volume and
+invalid-WAV behavior also passed real SDL/Onion host integration checks.
+
 ## Verification and known limits
 
 As of November 12, 2026, operator testing on Onion v4.3.1-1 confirmed Daily gameplay

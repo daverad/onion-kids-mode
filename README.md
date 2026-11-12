@@ -21,6 +21,9 @@ and an optional play timer.
   engine — your active theme's background, fonts, colors, header/footer
   bars, button hints and full-width list rows — so Kids Mode feels like
   part of the OS, not an app drawn on top of it.
+- **Theme menu sounds**: navigation, confirm and back use Onion's active-theme
+  sound (standard fallback), respecting menu volume, master mute and zero volume.
+  Kids Mode does not start background music. Audio closes before game launch.
 - **Exiting a game returns to the carousel — never to Onion's menus.**
 - **Three timer modes**: No limit, Single session (one handoff), or Daily allowance
   (a recurring amount for each child). Both timed modes count only while a game

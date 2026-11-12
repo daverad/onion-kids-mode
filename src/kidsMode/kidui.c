@@ -37,7 +37,7 @@
 // applied to the screen there and then.
 //
 // PIN screens: UP/DOWN changes the digit, LEFT/RIGHT moves, A confirms
-// (START is a silent alias). --notice "..." shows a short message under the
+// (START is an unadvertised alias). --notice "..." shows a short message under the
 // PIN boxes (e.g. "Wrong PIN - try again"); it clears when the screen is
 // left. --start-pin opens the carousel directly on its PIN screen, so a
 // failed attempt can retry in place instead of bouncing to the kid screen.
@@ -99,6 +99,7 @@
 #include "utils/msleep.h"
 #include "utils/sdl_init.h" // pulls in system/display.h: display_setBrightness
 #include "utils/str.h"
+#include "menu_audio.h"
 
 // display_setBrightness(0-10) comes from system/display.h and MAX_BRIGHTNESS
 // (10) from system/settings.h, both pulled in via sdl_init.h. The level is
@@ -1188,8 +1189,14 @@ int main(int argc, char *argv[])
     log_setName("kidui");
     remove(RESULT_FILE); // no stale results from a previous run
 
-    if (!SDL_InitDefault())
+    /* Audio is optional; rendering must survive an unavailable sound device. */
+    SDL_InitDefault();
+    if (video == NULL || screen == NULL) {
+        Mix_CloseAudio();
+        TTF_Quit();
+        SDL_Quit();
         return 1;
+    }
     fprintf(stderr, "kidui: sdl ready at %.0f ms\n", nowMs() - t_start);
 
     // Text entry (child names) runs on the on-screen keyboard MainUI uses
@@ -1216,6 +1223,7 @@ int main(int argc, char *argv[])
             writeResult("KEYBOARD", entered, NULL);
             kb_rc = 5;
         }
+        Mix_CloseAudio();
         TTF_Quit();
         SDL_Quit();
         return kb_rc;
@@ -1232,6 +1240,8 @@ int main(int argc, char *argv[])
     font_info = theme_loadFont(theme()->path, theme()->list.font,
                                INFO_FONT_SIZE);
     fprintf(stderr, "kidui: fonts ready at %.0f ms\n", nowMs() - t_start);
+
+    menu_audio_init();
 
     Screen active_screen = SCREEN_CAROUSEL;
     int remaining = -1;
@@ -1391,16 +1401,19 @@ int main(int argc, char *argv[])
         if (updateKeystate(keystate, &quit, true, &changed_key) &&
             keystate[changed_key] == PRESSED) {
             pin_last_input = ticks;
+            bool feedback = true;
 
             if (active_screen == SCREEN_CAROUSEL && games_count > 0) {
                 switch (changed_key) {
                 case SW_BTN_RIGHT:
                 case SW_BTN_DOWN:
+                    feedback = games_count > 1;
                     current = (current + 1) % games_count;
                     dirty = true;
                     break;
                 case SW_BTN_LEFT:
                 case SW_BTN_UP:
+                    feedback = games_count > 1;
                     current = (current + games_count - 1) % games_count;
                     dirty = true;
                     break;
@@ -1415,6 +1428,7 @@ int main(int argc, char *argv[])
                     dirty = true;
                     break;
                 default:
+                    feedback = false;
                     // Everything else is a no-op: no dead-ends for the kid
                     break;
                 }
@@ -1434,6 +1448,7 @@ int main(int argc, char *argv[])
                     dirty = true;
                     break;
                 default:
+                    feedback = false;
                     break;
                 }
             }
@@ -1441,6 +1456,7 @@ int main(int argc, char *argv[])
                 switch (changed_key) {
                 case SW_BTN_RIGHT:
                 case SW_BTN_UP:
+                    feedback = menu_timer_minutes < TIMER_MAX;
                     menu_timer_minutes += TIMER_STEP;
                     if (menu_timer_minutes > TIMER_MAX)
                         menu_timer_minutes = TIMER_MAX;
@@ -1448,6 +1464,7 @@ int main(int argc, char *argv[])
                     break;
                 case SW_BTN_LEFT:
                 case SW_BTN_DOWN:
+                    feedback = menu_timer_minutes > (picker_no_off ? TIMER_STEP : 0);
                     menu_timer_minutes -= TIMER_STEP;
                     if (menu_timer_minutes < (picker_no_off ? TIMER_STEP : 0))
                         menu_timer_minutes = picker_no_off ? TIMER_STEP : 0;
@@ -1479,6 +1496,7 @@ int main(int argc, char *argv[])
                     }
                     break;
                 default:
+                    feedback = false;
                     break;
                 }
             }
@@ -1509,6 +1527,7 @@ int main(int argc, char *argv[])
                     quit = true;
                     break;
                 default:
+                    feedback = false;
                     break;
                 }
             }
@@ -1529,6 +1548,7 @@ int main(int argc, char *argv[])
                     bool changed = changed_key == SW_BTN_LEFT
                                        ? list_keyLeft(&menu_list, false)
                                        : list_keyRight(&menu_list, false);
+                    feedback = changed;
                     if (changed) {
                         if (menu_list.active_pos == MENU_MODE)
                             refreshTimerMenu(&menu_list, active_timer_mode);
@@ -1575,6 +1595,7 @@ int main(int argc, char *argv[])
                     }
                     else if (menu_list.active_pos == MENU_AUTORESUME ||
                              menu_list.active_pos == MENU_BRIGHTNESS) {
+                        feedback = false;
                         // Nothing to confirm — both rows take effect as they
                         // move — so A stays put instead of dropping the
                         // parent out of the menu like Back does
@@ -1604,6 +1625,7 @@ int main(int argc, char *argv[])
                     quit = true;
                     break;
                 default:
+                    feedback = false;
                     break;
                 }
             }
@@ -1628,7 +1650,7 @@ int main(int argc, char *argv[])
                 case SW_BTN_A:
                 case SW_BTN_START: {
                     // A confirms, like everywhere else in Onion (START kept
-                    // as a silent alias for old muscle memory)
+                    // as an unadvertised alias for old muscle memory)
                     char pin_str[8];
                     snprintf(pin_str, sizeof(pin_str), "%d%d%d%d",
                              pin_digits[0], pin_digits[1], pin_digits[2],
@@ -1655,9 +1677,15 @@ int main(int argc, char *argv[])
                     }
                     break;
                 default:
+                    feedback = false;
                     break;
                 }
             }
+            else {
+                feedback = false;
+            }
+            if (feedback)
+                menu_audio_play(ticks);
         }
 
         // SELECT+START held: parent unlock gesture (any kid-facing screen)
@@ -1797,9 +1825,11 @@ int main(int argc, char *argv[])
             dirty = false;
         }
 
+        menu_audio_idle(ticks);
         msleep(10);
     }
 
+    menu_audio_finish();
     if (artwork != NULL)
         SDL_FreeSurface(artwork);
     if (font_gamelabel != NULL)
