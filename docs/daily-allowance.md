@@ -44,6 +44,53 @@ last recorded time. Recovery on the same date preserves usage and bonus; a later
 date receives exactly one new daily allowance. Invalid, untrusted or still-backward
 time cannot grant a fresh day. There is no child-facing date-setting control.
 
+### RTC eligibility and timing checks
+
+Daily renewal needs a calendar clock that advances while the device is fully off.
+A plausible current date, an `rtc0` device, or the Miyoo model name does not prove
+that capability: Onion can restore a saved timestamp and add emulated time at boot.
+The setup checks system evidence automatically; parents do not have to run a
+shutdown experiment or keep Wi-Fi connected.
+
+- **Boot evidence:** on supported Onion v4.3.1-1, accept Onion's volatile RTC marker,
+  this boot's previously verified Kids Mode marker, or exactly one valid kernel
+  startup record from `ms_rtcpwc 1f006800.rtcpwc`. That record samples the RTC before
+  Onion restores saved time or synchronizes over the network. Reject registration-only
+  messages, malformed/duplicate records, other drivers, 1970/uninitialized clocks,
+  and epochs outside 2020 through the supported signed-32-bit time range.
+- **Wrapped boot log:** only the startup hook can use the fallback. Require the known
+  RTC driver, `hctosys=1`, valid RTC and system epochs agreeing within **two seconds**,
+  both Onion clock writers disabled, and no current-boot network-sync marker.
+  A current RTC reading in the parent menu cannot establish this fallback itself.
+- **Trust lifetime:** retain verified evidence only in `/tmp` for the current boot.
+  Switching timer modes survives kernel-log wrap; a reboot needs fresh evidence.
+  A copied SD-card settings snapshot never certifies another device's hardware.
+- **Elapsed play versus calendar time:** gameplay uses monotonic time. The running
+  Daily supervisor flags wall-clock reversal or an advance exceeding the observed
+  monotonic interval by more than **two seconds** as uncertain. Awake samples over
+  **two seconds** are treated as a scheduling/sleep gap, not charged as gameplay.
+  Local calendar dates control renewal; a reboot is not itself a new day.
+
+### Unsupported hardware and recovery
+
+If retained RTC evidence is missing, invalid or unsupported, enabling Daily returns
+**“Offline daily limit unavailable”** and leaves the existing timer mode/amount
+unchanged. This rejection occurs before clock flags are changed. **No limit** and
+**Single session** remain available without RTC hardware; the application does not
+silently switch to unlimited play or require Wi-Fi as a substitute.
+
+An invalid or backward date during existing Daily use preserves the ledger and
+marks the date uncertain instead of granting a fresh allowance. Uncertain Daily
+play is paused; the PIN-protected parent controls remain available. When a trusted
+clock reaches a non-backward date/time, recovery is automatic: same-day recovery
+retains usage and bonus, and a later day grants exactly one fresh daily budget.
+It does not accumulate missed days or let the child set a date to obtain more time.
+
+Hardware without a powered retained RTC cannot determine how long it was fully off.
+That is a reason to use Single session on that device, not to pretend an estimated
+calendar is reliable. An uninitialized but supported RTC may need its date/time set
+once in Onion; battery removal and long-term drift remain hardware limits.
+
 ### Automatic clock setup
 
 Copy the app and open Kids Mode normally. **Daily stays off until a parent enables
@@ -213,8 +260,6 @@ Outstanding hardware limits:
 - The gameplay-only Single session change and automatic clock setup on a fresh
   device still need their own end-to-end hardware qualification. The existing
   device's accepted offline tests are not a fresh-install test.
-- Battery header refresh/icon sizing and the carousel's restart hint remain theme
-  concerns. Reduced idle CPU work does not establish battery runtime.
 - The inherited missing-binary/repeated-UI-crash recovery can disarm Kids Mode into
   normal Onion. This contribution is not a tamper-proof kiosk boundary.
 

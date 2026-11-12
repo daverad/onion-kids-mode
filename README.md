@@ -85,8 +85,9 @@ The original launcher was tested on a Miyoo Mini Plus with Onion 4.4-beta.
 The Daily candidate has been exercised on a Miyoo running **Onion v4.3.1-1**.
 Automatic offline Daily setup currently supports that exact Onion version and
 requires retained-clock evidence at boot. Devices without a supported retained RTC
-can still use No limit and Single session. Wi-Fi is not required for normal Daily
-use on supported hardware. Other firmware, the Mini V4's 752×560 screen and the base
+can still use No limit and Single session. An unsupported Daily opt-in explains why
+and preserves the existing timer; see [RTC checks and fallback behavior](docs/daily-allowance.md#rtc-eligibility-and-timing-checks).
+Wi-Fi is not required for normal Daily use on supported hardware. Other firmware, the Mini V4's 752×560 screen and the base
 Mini need separate qualification; a model name alone does not prove RTC support.
 
 ## Install
