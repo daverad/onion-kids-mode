@@ -702,7 +702,12 @@ restore_target_profile() {
     printf '%s\n' "$kids_profile_prefix$_rt"
 }
 
+# shellcheck source=profiles.sh
 . "$appdir/profiles.sh"
+# shellcheck source=clock.sh
+. "$appdir/clock.sh"
+# shellcheck source=timers.sh
+. "$appdir/timers.sh"
 
 # --------------------------- the roster ------------------------------------
 
@@ -771,6 +776,13 @@ adopt_stranded_legacy() {
 # expose the parent's recent games. keymon reads keymap.json at startup, so
 # it is restarted after the change. Original keymap restored on unlock.
 
+# Onion keymon reads UTC with gmtime, then writes it through mktime on exit.
+# Inheriting an app's local TZ shifts the system clock on every restart. Match
+# Onion's normal UTC environment; the allowance/game processes keep local TZ.
+start_keymon() {
+    TZ=UTC0 keymon &
+}
+
 apply_keymap_override() {
     mkdir -p "$backupdir"
     if [ -f "$keymapcfg" ]; then
@@ -786,7 +798,7 @@ apply_keymap_override() {
         printf '{\n    "ingame_single_press": 2\n}\n' > "$keymapcfg"
     fi
     killall keymon 2> /dev/null
-    keymon &
+    start_keymon
     log "MENU button set to exit-to-launcher while armed."
 }
 
@@ -803,31 +815,10 @@ restore_keymap_override() {
     if [ "$keymap_restored" = "1" ]; then
         sync
         killall keymon 2> /dev/null
-        keymon &
+        start_keymon
         log "keymap.json restored."
     fi
 }
-
-# ------------------------------ play timer ---------------------------------
-# Daily play budget in 5-minute steps (timer_minutes in kidmode.json;
-# 0 = no timer). A background ticker counts *consumed* seconds — not wall
-# clock — so sleeping the device pauses the timer and rebooting doesn't
-# reset it (used/bonus persist in timer_state.txt, keyed to the day).
-# The countdown shows inside games via RetroArch's OSD (see notify_game);
-# at zero RetroArch gets a network QUIT, which triggers Onion's normal
-# auto-save — the game resumes exactly there next launch.
-
-get_timer_minutes() {
-    tm="$(config_get timer_minutes)"
-    case "$tm" in
-        '' | *[!0-9]*) echo 0 ;;
-        *) echo "$tm" ;;
-    esac
-}
-
-# Highest value the pickers offer, in minutes; must match TIMER_MAX in
-# src/kidsMode/kidui.c
-timer_max=120
 
 # ------------------------------ brightness ---------------------------------
 # The parent sets the screen brightness from the menu; kidui writes it to
@@ -859,201 +850,6 @@ apply_brightness() {
     bpct="$(get_brightness_pct)"
     [ "$bpct" -ge 0 ] && "$kidui_bin" --set-brightness "$bpct" > /dev/null 2>&1
     return 0
-}
-
-# Read all three lines in one go, in the shell. This is called from the
-# ticker every 10s and twice on the way to the launcher; three sed spawns
-# each time is a real cost on this hardware.
-state_read() {
-    st_day=""
-    st_used=0
-    st_bonus=0
-    [ -f "$timer_state" ] || return 0
-    {
-        IFS= read -r st_day || true
-        IFS= read -r st_used || true
-        IFS= read -r st_bonus || true
-    } < "$timer_state" 2> /dev/null
-    case "$st_used" in '' | *[!0-9]*) st_used=0 ;; esac
-    case "$st_bonus" in '' | *[!0-9]*) st_bonus=0 ;; esac
-    return 0
-}
-
-state_day() {
-    state_read
-    printf '%s\n' "$st_day"
-}
-state_used() {
-    state_read
-    printf '%s\n' "$st_used"
-}
-state_bonus() {
-    state_read
-    printf '%s\n' "$st_bonus"
-}
-
-state_write() { # $1 used, $2 bonus
-    mkdir -p "$backupdir"
-    printf '%s\n%s\n%s\n' "$(date +%Y-%m-%d)" "$1" "$2" > "$timer_state.tmp"
-    mv -f "$timer_state.tmp" "$timer_state"
-}
-
-# Recompute and publish remaining seconds right now (clamped to >= 0;
-# file absent = timer off). Called by the ticker and after menu changes.
-# NB: the budget is per SESSION (set at arm / extended via Add play time);
-# there is no daily reset — a new arm starts a fresh budget.
-update_remaining_now() {
-    budget=$(($(get_timer_minutes) * 60 + $(state_bonus)))
-    if [ "$budget" -le 0 ]; then
-        rm -f "$remaining_file"
-        return 0
-    fi
-    rem=$((budget - $(state_used)))
-    [ "$rem" -lt 0 ] && rem=0
-    echo "$rem" > "$remaining_file"
-    return 0
-}
-
-timer_remaining() {
-    update_remaining_now
-    if [ -f "$remaining_file" ]; then
-        cat "$remaining_file"
-    else
-        echo -1 # timer off
-    fi
-}
-
-add_bonus() {
-    state_write "$(state_used)" "$(($(state_bonus) + $1))"
-    update_remaining_now
-    log "Bonus play time added: $1 s"
-}
-
-set_timer_minutes() {
-    config_merge --argjson m "$1" '.timer_minutes = $m'
-    update_remaining_now
-    log "Timer set to $1 min/day."
-}
-
-# RetroArch redraws the framebuffer every frame, so imgpop overlays are not
-# reliably visible inside games. Use RetroArch's own OSD instead (SHOW_MSG
-# network command — same socket used for the graceful QUIT). Silently
-# ignored by anything that isn't RetroArch.
-notify_game() {
-    sendUDP "SHOW_MSG $1" > /dev/null 2>&1 &
-}
-
-# RA's OSD messages last ~3 s; re-pushing the same text every ~2 s makes it
-# render as one continuous message.
-pin_message() {
-    (
-        for _i in 1 2 3 4 5; do
-            sendUDP "SHOW_MSG $1" > /dev/null 2>&1
-            sleep 2
-        done
-    ) &
-}
-
-game_is_running() {
-    pgrep -f "cmd_to_run.sh" > /dev/null 2>&1
-}
-
-# Ask the running game to stop gracefully. RetroArch first (network QUIT →
-# normal exit path → Onion auto-save state); escalate only if needed.
-# Non-RetroArch games (ports, standalone) get a plain TERM — best effort.
-save_quit_game() {
-    notify_game "Time's up! Saving your game..."
-    sleep 2
-    if pgrep retroarch > /dev/null 2>&1; then
-        sendUDP QUIT
-        sleep 3
-        if pgrep retroarch > /dev/null 2>&1; then
-            sendUDP QUIT
-            sleep 3
-        fi
-        if pgrep retroarch > /dev/null 2>&1; then
-            killall -TERM retroarch 2> /dev/null
-            sleep 2
-        fi
-    elif game_is_running; then
-        pkill -TERM -f "cmd_to_run.sh" 2> /dev/null
-        sleep 2
-    fi
-    log "Play time over; game stopped."
-}
-
-ticker_loop() {
-    prev_rem=999999
-    while [ -f "$flagfile" ]; do
-        sleep 10
-        [ -f "$flagfile" ] || break
-        [ -f /tmp/shutting_down ] && break
-
-        budget=$(($(get_timer_minutes) * 60 + $(state_bonus)))
-        if [ "$budget" -le 0 ]; then
-            rm -f "$remaining_file"
-            prev_rem=999999
-            continue
-        fi
-
-        used=$(($(state_used) + 10))
-        state_write "$used" "$(state_bonus)"
-        rem=$((budget - used))
-        [ "$rem" -lt 0 ] && rem=0
-        echo "$rem" > "$remaining_file"
-
-        if game_is_running; then
-            rem_min=$(((rem + 59) / 60))
-
-            # Fresh game session: announce the budget once via RA's OSD
-            if [ "$game_seen" != "1" ]; then
-                game_seen=1
-                [ "$rem" -gt 0 ] && notify_game "Play time: $rem_min minutes"
-            fi
-
-            # In-game countdown via RetroArch OSD only. (imgpop overlays are
-            # erased by RA's per-frame redraw AND draw in panel-native
-            # coordinates — rotated 180° from the viewed image — so they
-            # only produce a brief flipped flash. Not used during games.)
-            if [ "$rem" -gt 0 ]; then
-                if [ "$rem_min" -le 5 ]; then
-                    # Last 5 minutes: countdown stays pinned on screen
-                    if [ "$rem_min" -eq 1 ]; then
-                        pin_message "1 minute left!"
-                    else
-                        pin_message "$rem_min minutes left"
-                    fi
-                elif [ "$rem_min" != "$last_notified_min" ] &&
-                    [ $((rem_min % 5)) -eq 0 ]; then
-                    notify_game "$rem_min minutes left"
-                fi
-                last_notified_min="$rem_min"
-            fi
-
-            if [ "$rem" -le 0 ]; then
-                save_quit_game
-            fi
-        else
-            game_seen=0
-            last_notified_min=""
-        fi
-        prev_rem=$rem
-    done
-    rm -f "$remaining_file"
-}
-
-start_ticker() {
-    stop_ticker
-    ticker_loop &
-    echo $! > "$ticker_pid_file"
-}
-
-stop_ticker() {
-    if [ -f "$ticker_pid_file" ]; then
-        kill "$(cat "$ticker_pid_file")" 2> /dev/null
-        rm -f "$ticker_pid_file"
-    fi
-    rm -f "$remaining_file"
 }
 
 # --------------------------- shutdown handling -----------------------------
@@ -1092,17 +888,7 @@ set_resolution() {
     killall -SIGUSR1 keymon 2> /dev/null
 }
 
-enable_ra_network_cmds() {
-    # Same patch runtime.sh applies before every game (Onion features rely
-    # on RetroArch network commands, e.g. save-on-shutdown).
-    if [ -x "$sysdir/script/patch_ra_cfg.sh" ]; then
-        cat > /tmp/onion_ra_patch.cfg <<- EOM
-network_cmd_enable = "true"
-EOM
-        "$sysdir/script/patch_ra_cfg.sh" /tmp/onion_ra_patch.cfg
-        rm -f /tmp/onion_ra_patch.cfg
-    fi
-}
+
 
 # "Start over": launch without loading the auto-save snapshot. Same
 # mechanism Onion's runtime.sh uses for its reset-game flag. In-game saves
@@ -1201,8 +987,8 @@ run_game_cmd() {
     [ -n "$run_rompath" ] && playActivity start "$run_rompath"
 
     log "launching: $run_cmd"
-    cd /mnt/SDCARD/RetroArch || cd "$appdir"
-    TZ="$tz_value" sh "$sysdir/cmd_to_run.sh"
+    cd /mnt/SDCARD/RetroArch || cd "$appdir" || return 1
+    timer_run_game
     run_retval=$?
     log "game exited with $run_retval"
 
@@ -1224,7 +1010,7 @@ run_game_cmd() {
     rm -f "$reset_cfg"
 
     rm -f "$sysdir/cmd_to_run.sh"
-    cd "$appdir" 2> /dev/null
+    cd "$appdir" 2> /dev/null || return 1
 
     check_off_order "End_Save"
     return 0
@@ -1244,13 +1030,16 @@ hook_dst="$sysdir/startup/kidmode_boot.sh"
 
 install_hook() {
     [ -f "$hook_src" ] || return 1
-    mkdir -p "$sysdir/startup"
+    mkdir -p "$sysdir/startup" || return 1
     if ! cmp -s "$hook_src" "$hook_dst" 2> /dev/null; then
-        cp "$hook_src" "$hook_dst"
+        [ ! -L "$hook_dst.new" ] || return 1
+        cp "$hook_src" "$hook_dst.new" && cmp -s "$hook_src" "$hook_dst.new" || return 1
+        sync
+        mv "$hook_dst.new" "$hook_dst" || return 1
         sync
         log "Boot hook installed to $hook_dst"
     fi
-    return 0
+    cmp -s "$hook_src" "$hook_dst"
 }
 
 # ------------------------ MainUI favorites shortcut ------------------------
@@ -1405,40 +1194,6 @@ EOF
     return 0
 }
 
-# --------------------------- session timer picker --------------------------
-# Shown right after arming: LEFT/RIGHT picks OFF / 5 / 10 / ... / 120 minutes
-# (default OFF; must match TIMER_MAX in src/kidsMode/kidui.c). Selecting a
-# value starts a fresh budget for this session.
-
-pick_session_timer() {
-    log "launcher: starting kidui (timer picker)"
-    rm -f "$uiresult"
-    "$kidui_bin" --pick-timer > "$uilog" 2>&1
-    picker_rc=$?
-    log_ui_timings
-
-    # A picks the shown value, B means "no timer" — both come back as a
-    # TIMER result. Anything else means kidui never got that far (crash,
-    # missing libs), and arming on a launcher that won't start would leave
-    # the device stuck, so bail out instead.
-    if [ "$picker_rc" -ne 5 ] || [ "$(sed -n 1p "$uiresult")" != "TIMER" ]; then
-        log_ui_failure "Timer picker returned nothing" "$picker_rc"
-        rm -f "$uiresult"
-        return 1
-    fi
-
-    picked="$(sed -n 2p "$uiresult")"
-    case "$picked" in
-        '' | *[!0-9]*) picked=0 ;;
-    esac
-    [ "$picked" -gt "$timer_max" ] && picked="$timer_max"
-    rm -f "$uiresult"
-
-    set_timer_minutes "$picked"
-    state_write 0 0 # fresh budget for this session
-    update_remaining_now
-}
-
 # -------------------------------- change PIN -------------------------------
 # Set a new PIN from inside the parent menu (the parent already unlocked, so
 # no need to re-verify the old one). A mismatch retries in place; B cancels.
@@ -1504,7 +1259,7 @@ switch_kid() {
     [ "$selected_kid" != "$_sk_from" ] || return 1
     # Selection does not change ownership. A crash in this screen leaves the
     # outgoing child's saves and pointer together.
-    pick_session_timer || return 1
+    timer_choose_for_child "$selected_kid" || return 1
     profile_begin switch "$_sk_from" "$selected_kid" || return 1
     log "Handed over to $(get_active_kid)."
     auto_resume_if_set
@@ -1607,8 +1362,8 @@ parent_menu() {
         rm -f "$uiresult" "$autoresume_result" "$brightness_result"
         ar_val=0
         [ "$(config_get auto_resume_last_game)" = "true" ] && ar_val=1
-        # The roster only tells kidui whether the switch row has anywhere
-        # to go; the menu never reads the save layout itself.
+        # Pass identity explicitly; the menu never reads the save layout.
+        # The roster determines whether switching has another destination.
         set --
         while IFS= read -r _pm_kid; do
             [ -n "$_pm_kid" ] || continue
@@ -1616,7 +1371,12 @@ parent_menu() {
         done <<EOF
 $(kid_roster)
 EOF
-        "$kidui_bin" --parent-menu \
+        daily_read || true
+        TZ="$(cat "$sysdir/config/.tz" 2>/dev/null)" "$kidui_bin" --parent-menu \
+            --last-kid "$(get_active_kid)" \
+            --daily "$daily_enabled" --daily-minutes "$daily_minutes" \
+            --session-minutes "$(get_timer_minutes)" \
+            --clock-warning "$daily_uncertain" --used "$daily_used" --budget-date "$daily_day" \
             --remaining "$(timer_remaining)" \
             --brightness "$(get_brightness_pct)" \
             --autoresume "$ar_val" "$@" > "$uilog" 2>&1
@@ -1669,14 +1429,28 @@ EOF
             UNLOCK)
                 return 0
                 ;;
+            SESSION)
+                case "$menu_arg" in ''|*[!0-9]*) continue ;; esac
+                [ "$menu_arg" -gt 0 ] && [ "$menu_arg" -le "$timer_max" ] && [ "$((menu_arg % 5))" -eq 0 ] || continue
+                start_single_session "$menu_arg" && return 1
+                ;;
+            DAILY)
+                case "$menu_arg" in ''|*[!0-9]*) continue ;; esac
+                daily_edit daily "$menu_arg" && return 1
+                ;;
+            CONFIRMDATE)
+                daily_edit confirm 0
+                ;;
             NOTIMER)
+                daily_edit off 0 || continue
                 # Turn the play timer off entirely: clear the configured
                 # minutes AND any bonus, so nothing keeps a budget alive.
                 # The kid can play with no limit until re-armed or time is
                 # added again.
-                set_timer_minutes 0
-                state_write 0 0
-                update_remaining_now
+                if ! { set_timer_minutes 0 && state_write 0 0 && update_remaining_now; }; then
+                    infoPanel -t "Play timer" -m "Timer change did not finish.\nCheck the SD card and retry." --auto
+                    continue
+                fi
                 log "Play timer turned off from the parent menu."
                 return 1
                 ;;
@@ -1747,6 +1521,9 @@ disarm() {
 
 cmd_run() {
     profile_resume || return 1
+    # Upgrade an existing legacy session without enabling Daily implicitly.
+    daily_prepare || log "Allowance unavailable; games blocked until parent recovery."
+    rm -f /tmp/kidmode_daily_game "$session_game_file"
     if [ ! -f "$kidui_bin" ]; then
         log "kidui binary missing; disarming."
         rm -f "$flagfile"
@@ -1759,7 +1536,6 @@ cmd_run() {
     pin_fails=0
     ui_timed=0
     pin_notice=""
-    update_remaining_now
 
     # Existing installs from before the PIN snapshot existed: take one now,
     # so the next app update can't lose the PIN either
@@ -1790,7 +1566,7 @@ cmd_run() {
 
         # Defensive cleanup: nothing may divert the loop into GameSwitcher
         rm -f "$sysdir/.runGameSwitcher" 2> /dev/null
-        pgrep keymon > /dev/null 2>&1 || keymon &
+        pgrep keymon > /dev/null 2>&1 || start_keymon
 
         # No PIN on file (armed, but the app folder was replaced and no
         # snapshot existed): the unlock gesture sets a NEW pin instead of
@@ -1964,20 +1740,19 @@ cmd_arm() {
             ;;
     esac
 
-    if ! pick_session_timer; then
+    if ! timer_choose_for_child "$selected_kid"; then
         infoPanel -t "Kids Mode" -m "Couldn't start the launcher.\nKids Mode was NOT armed." --auto
         return 1
     fi
-
-    migrate_shared_last_game
 
     # Arming rewrites four files and moves three folders, then flushes once
     # at the end rather than after each step.
     log "Arming: applying locks and swapping the kid's profile..."
     apply_ra_lock
     apply_blf_lock
-    apply_profile_isolation || return 1
     apply_keymap_override
+    apply_profile_isolation || return 1
+    migrate_shared_last_game
     ensure_fav_shortcut
     apply_brightness
     touch "$flagfile"
@@ -1990,9 +1765,14 @@ cmd_arm() {
 # tests/profile_test.sh sources this file to drive the save isolation
 # against a fixture directory instead of a card, so sourcing must not run a
 # command.
-[ "$kidmode_test" = "1" ] && return 0
+[ "${kidmode_test:-}" = "1" ] && return 0
 
 case "${1:-run}" in
+    restore-clock)
+        # Explicit maintenance command; never change clock policy while armed.
+        [ ! -f "$flagfile" ] && [ ! -f "$backupdir/profile.txn" ] || exit 1
+        clock_setup restore "$sysdir" "$backupdir" /tmp
+        ;;
     recover)
         profile_resume
         ;;
@@ -2008,7 +1788,7 @@ case "${1:-run}" in
         cmd_run
         ;;
     *)
-        echo "Usage: kid_mode_loop.sh [arm|run]" >&2
+        echo "Usage: kid_mode_loop.sh [arm|run|recover|restore-clock]" >&2
         exit 1
         ;;
 esac

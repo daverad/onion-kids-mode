@@ -1,88 +1,39 @@
-Everything a kid can reach is now locked down: RetroArch's in-game
-shortcuts, the blue-light toggle, and your save states. Plus longer play
-sessions, screen brightness from the menu, and a PIN you can change on the
-device.
+## Daily gameplay allowance candidate
 
-## Locked down while armed
+Parents can choose No limit, Single session, or Daily allowance. Both timed modes
+pause in menus and sleep. Each child has an independent Daily budget; usage survives
+reboot and mode changes, unused time and bonus expire at local midnight, and a PIN
+permits extra time today. Daily warns at five and one minute and blocks new play at
+zero after requesting the supported RetroArch save/exit path.
 
-- **RetroArch's in-game hotkeys are dead** — MENU+SELECT (the RetroArch
-  menu), MENU+L2/R2 (save/load state), MENU+L/R (rewind, fast-forward),
-  MENU+←/→ (save slots), screenshots, cheats, shaders, disc swap and the
-  rest. Kiosk mode only ever hid the *settings*; the menu itself still
-  opened. MENU+VOLUME for brightness is untouched — that one is handled
-  outside RetroArch. Fixes #4. Prefer stock shortcuts? Set
-  `"lock_retroarch_hotkeys": false`.
-- **MENU+B blue-light toggle** does nothing while armed (a schedule you
-  have configured still runs).
-- **The kid gets their own saves**: `saves`, `states` and `romScreens` are
-  swapped for a persistent `Saves/KidsProfile` while armed, so a child
-  can't overwrite your save states or flood the game switcher with their
-  thumbnails. Their progress persists between sessions; yours comes back
-  untouched on unlock. Per-core settings and themes stay shared.
+This builds on whawker's multi-child profiles in #7. The save-recovery repair is a
+separate commit: interrupted handoffs resume a checksummed transaction without
+replacing another child's saves. The core timer feature is squashed separately.
 
-## Parent menu
+## Installation and clock support
 
-- **Longer sessions**: the play timer now goes to **120 minutes**, up from
-  50 — on the arm screen and on *Add play time*.
-- **Brightness** straight from the menu, changing as you move the row —
-  no confirm — in 10% steps down to 10%.
-- **Change PIN** on the device — no computer, no SD card reader.
-- **Auto-resume last game**: boot straight back into what the kid was
-  playing instead of the carousel.
-- Coming back from a game reopens the carousel **on the game just played**,
-  not at the start.
+These are **unofficial, UNQUALIFIED candidate** archives, not a universal hardware
+compatibility claim. Read `docs/daily-allowance.md` and back up the entire `Saves`
+directory, app and boot hook. Exit Kids Mode normally before replacing the app.
+Preserve per-child `.allowance-id` and allowance records across updates.
 
-## Carousel
+Daily opt-in automatically configures offline clock flags only on supported Onion
+v4.3.1-1 with retained RTC evidence at boot. Original flags are backed up for rollback;
+network time is disabled to avoid conflicting RTC writers. No continuous Wi-Fi is
+required. Unsupported devices can use Single session or No limit.
 
-- **Battery level** on the kid screen, drawn exactly as Onion draws it
-  everywhere else (icon and level, top right), with the play-time chip
-  opposite it.
-- **X = RESTART** now has a footer hint and icon, so the start-over shortcut
-  is visible instead of hidden.
-- **Long titles wrap** onto a second line instead of being cut off with an
-  ellipsis.
+## Verification limits
 
-## Faster
+Pinned ARM builds and focused host checks cover profile recovery, clock and timer
+adapters, strict C diagnostics, static analysis, ASan/UBSan/leak detection, runtime
+I/O faults and bounded fuzzing. Daily accounting, warnings, bonus, child isolation,
+offline renewal and restart have operator acceptance on the tested Miyoo.
 
-Arming went from ~15 seconds of black screen to about **1.5**. Three
-things were doing it, none of them what they looked like:
+A child-switch display freeze remains unresolved, despite completed save ownership
+transfer. Actual save validity after timer expiry, rollback on hardware, fresh-device
+clock setup and the updated Single session behavior still need qualification.
+See the guide for details; host tests do not establish arbitrary FAT32 power-loss
+recovery or a tamper-proof kiosk boundary.
 
-- The RetroArch lock matched every setting against every line with a
-  regex built from a variable, which busybox awk recompiles each time —
-  ~133,000 compilations. Matching each line's key once and looking it up
-  in a hash: 14s → under 1s. (It also left duplicate keys later in the
-  file untouched, and RetroArch honours the last one, so a repeated key
-  silently defeated the lock.)
-- Every config read spawned `jq`. Reads now parse in the shell, with jq
-  kept for writes and as a fallback for any file the parser won't touch.
-- The timer state file cost three `sed` processes per read, and the
-  ticker reads it every 10 seconds.
-
-## Also
-
-- README gains a settings table for `kidmode.json` and an FAQ (including
-  netplay — it's driven from the RetroArch menu, which Kids Mode blocks, so
-  it isn't available while armed).
-- A `kidmode.json` with broken JSON is now backed up before being reset,
-  so a stray comma doesn't silently lose your settings.
-
-## Install
-
-1. Download `KidsMode.zip` below
-2. Copy the `KidsMode` folder into `App/` on your SD card (so it becomes
-   `/App/KidsMode/`)
-3. Reboot, then arm from **Apps → Kids Mode**
-
-**Updating from v1.1.0:** replace the `KidsMode` folder — your PIN survives
-(it's snapshotted in `Saves/kidmode/`). The new locks apply the next time
-you arm Kids Mode.
-
-## Thanks
-
-The hotkey lockout, blue-light guard, save isolation and auto-resume are
-[@Veuks](https://github.com/Veuks)' work, forwarded by
-[@andygeorge](https://github.com/andygeorge) in #5.
-
-Requires **Onion OS 4.3+**. Tested on a Miyoo Mini Plus running Onion
-4.4-beta; base Mini and Mini V4 are supported in code but less tested —
-reports welcome.
+GPL-3.0; original contributor history and attribution retained. Development used
+OpenAI Codex assistance and physical-device feedback.

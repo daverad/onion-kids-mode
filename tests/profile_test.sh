@@ -17,7 +17,7 @@
 # no arrays, no [[.
 # ---------------------------------------------------------------------------
 
-testdir="$(CDPATH= cd -- "$(dirname "$0")" > /dev/null 2>&1 && pwd -P)"
+testdir="$(CDPATH='' cd -- "$(dirname "$0")" > /dev/null 2>&1 && pwd -P)"
 loopsh="$testdir/../App/KidsMode/kid_mode_loop.sh"
 
 work="${TMPDIR:-/tmp}/kidmode_profile_test.$$"

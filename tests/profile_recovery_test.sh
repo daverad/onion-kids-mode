@@ -57,6 +57,7 @@ for mode in arm switch disarm adopt; do
                     pick_session_kid() { selected_kid=Bea; }
                     pick_session_timer() { [ "$(get_active_kid)" = Ada ]; }
                     auto_resume_if_set() { :; }
+                    daily_prepare() { daily_enabled=0; }
                     switch_kid ;;
                 disarm) restore_profile_isolation ;;
                 adopt) adopt_legacy_profile Ada ;;
@@ -71,6 +72,29 @@ for mode in arm switch disarm adopt; do
     done
     echo "$mode: 15 interruption/replay boundaries preserved every save"
 done
+# The original reported crash: use the real two-child picker, then interrupt
+# at the following timer screen. Selection must not persist an incoming owner.
+fixture
+apply_profile_isolation
+cat > "$work/picker" <<'PICKER'
+#!/bin/sh
+printf 'KID\nBea\n' > "$TEST_PICK_RESULT"
+exit 5
+PICKER
+chmod +x "$work/picker"
+(
+    kidui_bin="$work/picker"; uiresult="$work/result"; uilog="$work/ui.log"
+    export TEST_PICK_RESULT="$uiresult"
+    daily_prepare() { daily_enabled=0; }
+    pick_session_timer() { exit 97; }
+    switch_kid
+) && rc=0 || rc=$?
+# The selected-profile scope now contains the interrupted picker; its caller
+# reports failure without leaking the incoming identity.
+[ "$rc" -eq 1 ] && [ "$(get_active_kid)" = Ada ]
+restore_profile_isolation
+verify
+echo 'real child picker interrupted at timer: outgoing owner and both saves preserved'
 fixture
 apply_profile_isolation
 # A conflict must fail before any move, leaving both copies available.

@@ -20,6 +20,12 @@ while [ -f /mnt/SDCARD/Saves/kidmode/profile.txn ]; do
     infoPanel -t "Kids Mode" -m "Save recovery needs attention.\nPower off and keep the SD card intact." --auto
     sleep 5
 done
+# Record clock provenance even when Kids Mode is not armed at startup.
+if [ -f /mnt/SDCARD/App/KidsMode/timers.sh ] && [ -f /mnt/SDCARD/App/KidsMode/clock.sh ]; then
+    # shellcheck source=timers.sh
+    . /mnt/SDCARD/App/KidsMode/timers.sh
+    daily_boot_clock /mnt/SDCARD/.tmp_update /tmp /mnt/SDCARD/Saves/kidmode
+fi
 [ -f "$flagfile" ] || exit 0
 
 if [ -f "$looper" ]; then

@@ -1,5 +1,12 @@
 # Kids Mode for Onion OS
 
+This branch adds **opt-in daily gameplay allowances**, recoverable multi-child saves,
+and gameplay-only session timers. It builds on [whawker's multi-profile contribution (#7)](https://github.com/daverad/onion-kids-mode/pull/7).
+Existing installations do not silently enable Daily. See the
+[daily allowance guide](docs/daily-allowance.md) for setup, clock requirements, checks,
+backup and rollback. This is an unofficial candidate with
+[remaining hardware limits](docs/daily-allowance.md#verification-and-known-limits).
+
 A fullscreen, favorites-only launcher that locks a **Miyoo Mini / Mini+**
 running [Onion OS](https://github.com/OnionUI/Onion) so a young child can
 use it unsupervised — big box art, one-button play, a PIN-protected exit,
@@ -15,17 +22,20 @@ and an optional play timer.
   bars, button hints and full-width list rows — so Kids Mode feels like
   part of the OS, not an app drawn on top of it.
 - **Exiting a game returns to the carousel — never to Onion's menus.**
-- **Play timer** (per session, optional): pick 5–120 minutes when arming.
-  Countdown shows inside games via RetroArch's on-screen messages (pinned
-  during the last 5 minutes); at zero the game is asked to quit gracefully,
-  so Onion's auto-save keeps the exact spot.
+- **Three timer modes**: No limit, Single session (one handoff), or Daily allowance
+  (a recurring amount for each child). Both timed modes count only while a game
+  is open; menus and sleep pause the timer. Daily usage survives reboot and mode
+  changes, unused time expires at local midnight, and a parent can grant a bonus
+  for today. Daily warns at five and one minute; at zero, Kids Mode requests the
+  normal RetroArch save/exit path and blocks new play. A failed exit is not proof
+  that a save completed.
 - **Auto power-off**: if the "Time's up!" screen is left alone for
   5 minutes (nobody turns the device off), it powers itself down cleanly
   instead of draining the battery.
 - **Parent menu** (hold **SELECT+START 3 s** → PIN): exit Kids Mode, add
-  play time right on the menu row — **◀ ▶** picks +5…+120 min,
-  **A**/**START** applies, and the header previews the remaining time before
-  and after — **turn the timer off entirely**, set the **screen
+  time through **Timer mode**, **Time this session** / **Time each day**, and
+  **Add to this session** / **Bonus today**. **◀ ▶** previews the amount and
+  **A** applies it. Choose **No limit** to turn the timer off, set the **screen
   brightness**, flip **auto-resume**, **switch to another kid**, **add
   another kid**, or **change the PIN** — all without leaving the launcher.
 - **Start over**: **X** on a game asks "Start over?" and launches from the
@@ -59,8 +69,8 @@ and an optional play timer.
 | :--: | :--: | :--: |
 | *The kid's carousel — one favorite at a time, box art and all; **A** plays, **X** starts over* | *Parent menu — play time with a live preview in the header, brightness, auto-resume and change PIN* | *The PIN gate — set once when arming; **A** confirms* |
 
-*(Rendered with Onion's stock theme — Kids Mode picks up whatever theme
-your device uses.)*
+*(These screenshots show the earlier session-only interface with Onion's stock
+theme. Current timer controls are described below; Kids Mode uses your active theme.)*
 
 ## Requirements
 
@@ -68,13 +78,20 @@ your device uses.)*
 - Games your kid should see must be **favorited** (★, press X on a game in
   Onion) and Onion's *auto save & resume* left on (it is by default).
 
-Tested on a Miyoo Mini Plus with Onion 4.4-beta. The Mini V4's 752×560
-screen and the base Mini are supported in code but less tested — reports
-welcome.
+The original launcher was tested on a Miyoo Mini Plus with Onion 4.4-beta.
+The Daily candidate has been exercised on a Miyoo running **Onion v4.3.1-1**.
+Automatic offline Daily setup currently supports that exact Onion version and
+requires retained-clock evidence at boot. Devices without a supported retained RTC
+can still use No limit and Single session. Wi-Fi is not required for normal Daily
+use on supported hardware. Other firmware, the Mini V4's 752×560 screen and the base
+Mini need separate qualification; a model name alone does not prove RTC support.
 
 ## Install
 
-1. Download `KidsMode.zip` from [Releases](../../releases).
+1. For an upstream release, use [Releases](https://github.com/daverad/onion-kids-mode/releases). To try this PR, use its
+   successful **KidsMode-app** build artifact; release downloads do not include
+   unmerged changes. Read the [backup and recovery instructions](docs/daily-allowance.md#data-and-recovery)
+   and exit Kids Mode normally before replacing files.
 2. Copy the `KidsMode` folder into the `App` folder on your SD card
    (so it becomes `/App/KidsMode/`). Don't replace the `App` folder itself.
 3. Reboot. Nothing changes until you arm it.
@@ -87,8 +104,9 @@ welcome.
 2. If more than one child is set up, pick who's playing (**▲ ▼**, **A** to
    choose — it opens on whoever played last). With one child this step
    doesn't appear.
-3. Pick a session timer (OFF / 5–120 min) — the device switches straight
-   into the kid launcher.
+3. Pick **Single session** (OFF / 5–120 min) unless that child already uses
+   Daily. Daily children retain their recurring budget and skip this picker.
+   To enable Daily initially, enter the parent menu after arming.
 4. Hand it over:
 
    | Button | Action |
@@ -100,14 +118,18 @@ welcome.
    | everything else | does nothing — no dead ends |
 
 5. **Parent access:** hold **SELECT+START ~3 s**, enter the PIN →
-   *Exit Kids Mode / Add play time / Turn off timer / Switch to another
-   kid / Add another kid / Brightness / Auto-resume last game /
-   Change PIN / Back*.
-   - **Add play time:** **◀ ▶** picks the amount (the header shows what the
-     remaining time becomes), **A**/**START** applies — you drop straight
-     back into the kid launcher.
-   - **Turn off timer:** removes any running timer (unlimited play until you
-     re-arm or add time again).
+   Choose **Timer mode** with **◀ ▶**: **No limit**, **Single session**, or
+   **Daily allowance**. Choose **Time this session** / **Time each day** as
+   applicable, then press **A**. A successful apply returns to the carousel;
+   **B** discards an unapplied timer edit.
+   - **Daily allowance:** resets at local midnight; **No play** means zero daily
+     minutes, not unlimited play. First-time opt-in checks and configures the
+     [offline clock](docs/daily-allowance.md#automatic-clock-setup).
+   - **Bonus today:** adds Daily time only for today. **Add to this session**
+     extends only the current session. Switching modes does not erase Daily usage.
+   - **No limit:** permits unlimited play without deleting the child's Daily ledger.
+   - **Switch to another kid** / **Add another kid:** use independent saves and
+     Daily budgets; see below.
    - **Brightness:** **◀ ▶** changes the screen brightness as you move it,
      in 10% steps down to 10% (never fully dark) — no confirm needed, and
      it's remembered for the next session. MENU+VOLUME still works in-game,
@@ -130,10 +152,10 @@ no list to keep in step with them, so you can add or remove a child from a
 computer by making or deleting a folder, and an app update can't lose them.
 
 - **Handing over to a sibling:** parent menu → **Switch to another kid**,
-  pick the name, pick a session time. The child finishing keeps everything
-  they did, the one taking over starts on their own saves, and you never
-  leave the launcher or see Onion's menus. The new session gets a fresh play
-  timer rather than inheriting whatever was left of the last one.
+  pick the name, then a session time unless that child uses Daily. The child
+  finishing keeps their saves; the incoming child uses their own saves and
+  recorded Daily balance. A Single session is a fresh handoff budget; switching
+  children never renews an already-used Daily allowance.
 - **Add a child:** parent menu → **Add another kid**, and type the name on
   Onion's usual on-screen keyboard. It creates the profile only — the
   session that's running keeps its own saves, so use **Switch to another
@@ -178,8 +200,9 @@ Changes take effect the next time you arm Kids Mode. Note that updating the
 app replaces `kidmode.json`, so re-apply your edits after an update (the
 PIN itself is restored automatically from `Saves/kidmode/`).
 
-Play-time limits are not settings — you pick the session length each time
-you arm, and can add more from the parent menu.
+Single-session time is chosen for each handoff. Daily policy and usage persist
+outside the app in `Saves/kidmode/allowance`, keyed by each profile's stable
+`.allowance-id`; keep those files when updating the app or renaming a child.
 
 ## FAQ
 
@@ -217,11 +240,9 @@ or renamed:
   accepted and re-hashed on next use. Also delete
   `Saves/kidmode/pin_backup.json` (the PIN's update-proof snapshot) so the
   old PIN can't be restored from it.
-- **Updating the app while armed is safe:** the PIN survives replacing
-  `App/KidsMode` thanks to the snapshot in `Saves/kidmode/`. If there's
-  genuinely no PIN anywhere (e.g. fresh SD contents while armed), the
-  SELECT+START unlock asks you to set a **new** PIN instead of locking
-  you out.
+- **Exit normally before updating:** back up the complete saves, app and boot
+  hook as described in the [recovery guide](docs/daily-allowance.md#data-and-recovery).
+  The PIN survives app replacement through its snapshot in `Saves/kidmode/`.
 - **Force-disarm:** delete the hidden file `/.kidmode` at the SD root →
   next boot is normal Onion.
 - **RetroArch settings stuck hidden or shortcuts still unbound:** copy
@@ -230,12 +251,13 @@ or renamed:
 - **Blue-light toggle still dead:** copy `Saves/kidmode/blue_light.sh.backup`
   over `.tmp_update/script/blue_light.sh` (or delete the guard block at the
   top of that file, marked `KIDMODE_BLF_GUARD`).
-- **Saves look wrong after a crash mid-session:** the kid's are in their
-  `Saves/KidsProfile*` folder, yours are parked in
-  `Saves/kidmode/profile-parked-*`. Arming again puts the parked ones back
-  first, or move them into `Saves/CurrentProfile/` yourself to undo the swap
-  by hand.
-- **Uninstall:** delete `/App/KidsMode/`, `/.kidmode` (if present),
+- **Interrupted profile handoff:** preserve the complete `Saves` directory,
+  including `profile.txn`, before recovery. Arming retries the recorded transaction
+  before proceeding. If a destination conflicts, recovery refuses to overwrite it;
+  do not manually merge or move folders based only on the selected child's name.
+- **Uninstall:** unlock normally, back up the complete save tree, and
+  [restore the original clock flags](docs/daily-allowance.md#automatic-clock-setup)
+  if Daily configured them. Then delete `/App/KidsMode/`, `/.kidmode` (if present),
   `/.tmp_update/startup/kidmode_boot.sh`, `/Saves/kidmode/` and every
   `/Saves/KidsProfile*` folder (those last ones are the children's save
   data — keep them if you might re-arm later).
@@ -264,13 +286,23 @@ require a patched `keymon`; it's documented in the source as future work.
 
 ## Building from source
 
-`src/kidsMode/kidui.c` builds inside an Onion source tree with the
+Run `sh tests/check.sh quick` for shell/profile/policy checks and `full` on Linux
+for analyzer, sanitizers, fault tests and a one-minute fuzz run (`candidate` uses ten
+minutes). See [reproducible candidate packaging](docs/daily-allowance.md#small-development-checks)
+for source fingerprints and checked ZIPs.
+
+`src/kidsMode/kidui.c` builds inside a pinned Onion source tree with the
 [miyoomini toolchain](https://hub.docker.com/r/aemiii91/miyoomini-toolchain):
 
 ```sh
-git clone https://github.com/OnionUI/Onion && cp -r src/kidsMode Onion/src/
-docker run --rm -v "$PWD/Onion":/root/workspace aemiii91/miyoomini-toolchain:latest \
-  /bin/bash -c "source /root/.bashrc; cd src/kidsMode && make"
+git clone https://github.com/OnionUI/Onion
+git -C Onion checkout 07505ea58c7bba698d6b9220ff43946a43cac76b
+cp -r src/kidsMode Onion/src/
+source_hash=$(python3 tools/source_hash.py | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])')
+docker run --rm -v "$PWD/Onion":/root/workspace \
+  -e KIDS_BUILD_SOURCE="$source_hash" \
+  aemiii91/miyoomini-toolchain@sha256:e5123590ad75d27f0f4c91196e3119a255cad45f3ae15243e29a8e0a2ec50132 \
+  /bin/bash -c 'source /root/.bashrc; cd src/kidsMode && make'
 ```
 
 The toolchain image is published for `linux/amd64` only, so on an Apple
@@ -288,8 +320,9 @@ card, since the failure modes there cost someone real save data:
 sh tests/profile_test.sh
 ```
 
-CI runs them under busybox `ash`, which is the shell the device actually
-has.
+CI runs the profile tests under BusyBox `ash`, plus the focused safety suite.
+Builds and release packaging depend on successful checks; PR artifacts are trial
+builds, not a claim that all hardware qualification has passed.
 
 ## Credits & license
 
@@ -300,4 +333,9 @@ The in-game hotkey lockout, the MENU+B blue-light guard, per-kid save
 isolation and auto-resume come from [@Veuks](https://github.com/Veuks),
 forwarded by [@andygeorge](https://github.com/andygeorge) in
 [#5](https://github.com/daverad/onion-kids-mode/pull/5).
+Multi-child profiles and per-child last-played state are
+[@whawker](https://github.com/whawker)'s contribution in
+[#7](https://github.com/daverad/onion-kids-mode/pull/7); its original commits are retained.
+Daily allowances, profile-recovery hardening and their checks were developed with
+OpenAI Codex assistance and physical-device feedback.
 GPL-3.0, same as Onion.

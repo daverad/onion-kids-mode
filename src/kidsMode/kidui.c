@@ -1,3 +1,7 @@
+#include "allowance_runtime.h"
+#ifndef KIDS_BUILD_SOURCE
+#define KIDS_BUILD_SOURCE "unverified"
+#endif
 // kidui - Kid Mode fullscreen favorites carousel for Onion OS
 //
 // Shows the device's favorites (/mnt/SDCARD/Roms/favourite.json) one game
@@ -45,7 +49,7 @@
 //   kidui --set-pin -t "..." [--notice "..."]
 //                                  PIN entry only (for initial PIN setup)
 //   kidui --parent-menu --remaining S [--brightness P] [--autoresume 0|1]
-//                      [--kid "Ada" --kid "Bea"]
+//                      [--kid "Ada" --kid "Bea"] [--last-kid "Ada"]
 //                                  post-PIN parent menu (S = seconds left,
 //                                  -1 = timer off). "Add play time" is an
 //                                  Onion-style value selector: LEFT/RIGHT
@@ -130,15 +134,19 @@ typedef enum { SCREEN_CAROUSEL,
                SCREEN_CONFIRM_RESTART } Screen;
 
 #define MENU_UNLOCK 0
-#define MENU_ADDTIME 1
-#define MENU_NOTIMER 2
-#define MENU_SWITCHKID 3
-#define MENU_ADDKID 4
-#define MENU_BRIGHTNESS 5
-#define MENU_AUTORESUME 6
-#define MENU_CHANGEPIN 7
-#define MENU_BACK 8
-#define MENU_ROWS 9
+#define MENU_CHILD 1
+#define MENU_MODE 2
+#define MENU_DURATION 3
+#define MENU_ADDTIME 4
+#define MENU_USAGE 5
+#define MENU_DATE 6
+#define MENU_SWITCHKID 7
+#define MENU_ADDKID 8
+#define MENU_BRIGHTNESS 9
+#define MENU_AUTORESUME 10
+#define MENU_CHANGEPIN 11
+#define MENU_BACK 12
+#define MENU_ROWS 13
 #define TIMER_STEP 5
 #define TIMER_MAX 120
 // Brightness is picked in 10% steps and never goes fully dark (min 10%).
@@ -773,13 +781,27 @@ static void renderConfirmRestart(const char *label, int remaining)
 static void renderTimesUp(void)
 {
     renderBase();
-    theme_renderHeader(screen, "Time's up!", false);
-    theme_renderHeaderBattery(screen, batteryPercentage());
-
+    const char *header = "Time's up!";
     int cx = g_display.width / 2;
-    drawText("Great playing!", cx, (int)(g_display.height * 0.4),
+    const char *title = "Great playing!";
+    const char *next = "See you next time.";
+    FILE *status_file = fopen("/tmp/kidmode_daily_status", "r");
+    if (status_file != NULL) {
+        unsigned daily = 0, error = 0, uncertain = 0;
+        if (fscanf(status_file, "%u %u %u", &daily, &error, &uncertain) == 3 &&
+            daily <= 1 && error <= 1 && uncertain <= 1 && daily) {
+            if (error || uncertain) header = "Kids Mode";
+            title = error || uncertain ? "Play paused" : "Time's up!";
+            next = error ? "Ask a parent to check storage." :
+                   uncertain ? "Ask a parent to check the date." : "More time tomorrow.";
+        }
+        fclose(status_file);
+    }
+    theme_renderHeader(screen, header, false);
+    theme_renderHeaderBattery(screen, batteryPercentage());
+    drawText(title, cx, (int)(g_display.height * 0.4),
              font_bigvalue, accentColor(), g_display.width - 40);
-    drawText("See you next time.", cx, (int)(g_display.height * 0.55),
+    drawText(next, cx, (int)(g_display.height * 0.55),
              font_info, theme()->list.color, g_display.width - 40);
 
     theme_renderFooter(screen);
@@ -789,6 +811,41 @@ static void formatAddMinutes(void *self, char *out_label)
 {
     ListItem *item = (ListItem *)self;
     sprintf(out_label, "+%d min", item->value * TIMER_STEP);
+}
+
+/* Onion's renderer provides STR_MAX bytes (theme/render/list.h). */
+static void formatDailyMinutes(void *self, char *out_label)
+{
+    const ListItem *item = self;
+    int value = item->value;
+    if (value < 0 || value > TIMER_MAX / TIMER_STEP) value = 0;
+    int length = value == 0 ? snprintf(out_label, STR_MAX, "No play") :
+        snprintf(out_label, STR_MAX, "%d min", value * TIMER_STEP);
+    if (length < 0 || length >= STR_MAX) out_label[0] = '\0';
+}
+
+static void formatTimerMode(void *self, char *out_label)
+{
+    const ListItem *item = self;
+    const char *labels[] = {"No limit", "Single session", "Daily allowance"};
+    int mode = item->value;
+    if (mode < 0 || mode > 2) mode = 0;
+    int n = snprintf(out_label, STR_MAX, "%s", labels[mode]);
+    if (n < 0 || n >= STR_MAX) out_label[0] = '\0';
+}
+
+static void refreshTimerMenu(List *list, int active_mode)
+{
+    int mode = list->items[MENU_MODE].value;
+    snprintf(list->items[MENU_DURATION].label, STR_MAX, "%s",
+             mode == 2 ? "Time each day" : "Time this session");
+    list->items[MENU_DURATION].disabled = mode == 0;
+    list->items[MENU_DURATION].value_min = mode == 1 ? 1 : 0;
+    if (mode == 1 && list->items[MENU_DURATION].value == 0)
+        list->items[MENU_DURATION].value = 1;
+    list->items[MENU_ADDTIME].disabled = mode == 0 || mode != active_mode;
+    snprintf(list->items[MENU_ADDTIME].label, STR_MAX, "%s",
+             active_mode == 2 ? "Bonus today" : "Add to this session");
 }
 
 static void formatBrightness(void *self, char *out_label)
@@ -847,8 +904,6 @@ static void renderMenu(List *list, int remaining)
         if (list->active_pos == MENU_ADDTIME)
             snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 %d", rem_min,
                      rem_min + add_min);
-        else if (list->active_pos == MENU_NOTIMER)
-            snprintf(chip, sizeof(chip), "%d \xE2\x86\x92 off", rem_min);
         else
             snprintf(chip, sizeof(chip), "%d min", rem_min);
     }
@@ -863,7 +918,12 @@ static void renderMenu(List *list, int remaining)
                   (int)(210.0 * g_scale), TEXT_LEFT);
 
     theme_renderFooter(screen);
-    theme_renderStandardHint(screen, "OK", "BACK");
+    bool timer_row = list->active_pos == MENU_MODE || list->active_pos == MENU_DURATION;
+    const char *confirm = timer_row ?
+        (list->items[MENU_MODE].value == 1 ? "START" : "APPLY") :
+        list->active_pos == MENU_ADDTIME ? "ADD" :
+        list->active_pos == MENU_DATE ? "CONFIRM" : "OK";
+    theme_renderStandardHint(screen, confirm, "BACK");
     theme_renderFooterStatus(screen, list->active_pos + 1, list->item_count);
 }
 
@@ -959,7 +1019,7 @@ static void renderPickTimer(const char *title, int minutes, bool no_off)
     if (minutes > 0)
         snprintf(value, sizeof(value), "%d min", minutes);
     else
-        snprintf(value, sizeof(value), "OFF");
+        snprintf(value, sizeof(value), "No limit");
     drawText(value, cx, value_cy, font_bigvalue, accentColor(), 0);
 
     SDL_Surface *arrow_left = resource_getSurface(LEFT_ARROW);
@@ -975,10 +1035,9 @@ static void renderPickTimer(const char *title, int minutes, bool no_off)
         SDL_BlitSurface(arrow_right, NULL, screen, &pos);
     }
 
-    drawText(no_off ? "How much play time to add?"
-                    : "Play time for this session",
-             cx, (int)(g_display.height * 0.62), font_info,
-             theme()->list.color, g_display.width - 40);
+    if (no_off)
+        drawText("How much play time to add?", cx, (int)(g_display.height * 0.62),
+                 font_info, theme()->list.color, g_display.width - 40);
 
     theme_renderFooter(screen);
     theme_renderStandardHint(screen, no_off ? "CONFIRM" : "START",
@@ -1002,6 +1061,12 @@ static void flip(void)
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && strcmp(argv[1], "--build-source") == 0) {
+        puts(KIDS_BUILD_SOURCE);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--allowance") == 0)
+        return allowance_main(argc, argv);
     t_start = nowMs();
     // Wall clock at main(), so the log can show how much of the gap is
     // spent before this point — process spawn and dynamic linking of the
@@ -1018,9 +1083,11 @@ int main(int argc, char *argv[])
     bool pick_timer_mode = false;
     bool keyboard_mode = false;
     bool pick_kid_mode = false;
-    char last_kid[STR_MAX] = ""; // roster entry to open the picker on
+    char last_kid[STR_MAX] = ""; // current child in menu / initial picker choice
     bool picker_no_off = false;
     bool start_on_pin = false;
+    int menu_daily = 0, menu_daily_minutes = 30, menu_session_minutes = 30, menu_clock_warning = 0;
+    int menu_used = 0, menu_day = 0;
     int menu_timer_minutes = 0;
     int menu_remaining = -1;
     int menu_bright = -1;  // brightness shown in the menu (%); -1 = read live
@@ -1032,6 +1099,31 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--set-pin") == 0)
             set_pin_mode = true;
+        else if (strcmp(argv[i], "--daily") == 0 && i + 1 < argc)
+            menu_daily = strcmp(argv[++i], "1") == 0;
+        else if ((strcmp(argv[i], "--daily-minutes") == 0 || strcmp(argv[i], "--session-minutes") == 0) && i + 1 < argc) {
+            bool daily_option = strcmp(argv[i], "--daily-minutes") == 0;
+            char *end = NULL;
+            const char *arg = argv[++i];
+            long value = strtol(arg, &end, 10);
+            if (end != arg && *end == '\0' && value >= 0 && value <= TIMER_MAX && value % TIMER_STEP == 0) {
+                if (daily_option) menu_daily_minutes = (int)value;
+                else menu_session_minutes = value > 0 ? (int)value : 30;
+            }
+        }
+        else if ((strcmp(argv[i], "--used") == 0 || strcmp(argv[i], "--budget-date") == 0) && i + 1 < argc) {
+            bool used_option = strcmp(argv[i], "--used") == 0;
+            char *end = NULL;
+            const char *arg = argv[++i];
+            long value = strtol(arg, &end, 10);
+            long max = used_option ? 93600 : 20991231;
+            if (end != arg && *end == '\0' && value >= 0 && value <= max) {
+                if (used_option) menu_used = (int)value;
+                else menu_day = (int)value;
+            }
+        }
+        else if (strcmp(argv[i], "--clock-warning") == 0 && i + 1 < argc)
+            menu_clock_warning = strcmp(argv[++i], "1") == 0;
         else if (strcmp(argv[i], "--parent-menu") == 0)
             menu_mode = true;
         else if (strcmp(argv[i], "--pick-timer") == 0)
@@ -1158,16 +1250,36 @@ int main(int argc, char *argv[])
     List menu_list = list_create(MENU_ROWS, LIST_SMALL);
     list_addItem(&menu_list,
                  (ListItem){.label = "Exit Kids Mode", .item_type = ACTION});
-    list_addItem(&menu_list, (ListItem){.label = "Add play time",
-                                        .item_type = MULTIVALUE,
-                                        .value_min = 1,
-                                        .value_max = TIMER_MAX / TIMER_STEP,
-                                        .value = 1,
-                                        .value_formatter = formatAddMinutes});
-    // Faded and skipped while no timer is running — nothing to turn off
-    list_addItem(&menu_list, (ListItem){.label = "Turn off timer",
-                                        .item_type = ACTION,
-                                        .disabled = menu_remaining < 0});
+    // Show whose budget is being edited. Use the entire native row so the
+    // existing 24-character profile-name limit remains readable.
+    ListItem child_item = {.item_type = ACTION, .disabled = true, .show_opaque = true};
+    snprintf(child_item.label, sizeof(child_item.label), "%.24s", last_kid[0] ? last_kid : "Default child");
+    list_addItem(&menu_list, child_item);
+    int active_timer_mode = menu_daily ? 2 : menu_remaining >= 0 ? 1 : 0;
+    list_addItem(&menu_list, (ListItem){.label = "Timer mode", .item_type = MULTIVALUE,
+        .value_min = 0, .value_max = 2, .value = active_timer_mode,
+        .value_formatter = formatTimerMode});
+    list_addItem(&menu_list, (ListItem){.label = "Time this session", .item_type = MULTIVALUE,
+        .value_min = 0, .value_max = TIMER_MAX / TIMER_STEP,
+        .value = (menu_daily ? menu_daily_minutes : menu_session_minutes) / TIMER_STEP,
+        .value_formatter = formatDailyMinutes});
+    list_addItem(&menu_list, (ListItem){.label = "Add to this session", .item_type = MULTIVALUE,
+        .value_min = 1, .value_max = TIMER_MAX / TIMER_STEP, .value = 1,
+        .value_formatter = formatAddMinutes});
+    ListItem usage_item = {.label = "Daily usage: none recorded", .item_type = ACTION, .disabled = true, .show_opaque = true};
+    if (menu_day != 0)
+        snprintf(usage_item.label, sizeof(usage_item.label), "Daily used %02d-%02d: %d min",
+            menu_day / 100 % 100, menu_day % 100, (menu_used + 59) / 60);
+    list_addItem(&menu_list, usage_item);
+    ListItem date_item = {.label = "Set date in Clock", .item_type = ACTION,
+        .disabled = !menu_clock_warning, .show_opaque = true};
+    time_t date_now = time(NULL);
+    struct tm date_local;
+    if (localtime_r(&date_now, &date_local) != NULL &&
+        date_local.tm_year >= 120 && date_local.tm_year <= 199)
+        strftime(date_item.label, sizeof(date_item.label),
+            menu_clock_warning ? "Confirm: %Y-%m-%d" : "Date: %Y-%m-%d", &date_local);
+    list_addItem(&menu_list, date_item);
     // Who is playing sits with the other session controls: it is a
     // hand-over, not a setting. Faded with fewer than two profiles, where
     // there is nobody to switch to.
@@ -1201,6 +1313,8 @@ int main(int argc, char *argv[])
     list_addItem(&menu_list,
                  (ListItem){.label = "Back", .item_type = ACTION});
 
+    refreshTimerMenu(&menu_list, active_timer_mode);
+
     // Child picker, built only when asked for: one row per name, opened on
     // whoever played last so the common case is a single button press.
     List kid_list = {0};
@@ -1231,7 +1345,7 @@ int main(int argc, char *argv[])
         // Arm flow defaults to no timer; add-time flow starts at one step
         menu_timer_minutes = picker_no_off ? TIMER_STEP : 0;
         if (strlen(pin_title) == 0)
-            strncpy(pin_title, "Play timer", STR_MAX - 1);
+            strncpy(pin_title, "Single session", STR_MAX - 1);
     }
     else {
         loadFavorites();
@@ -1416,6 +1530,8 @@ int main(int argc, char *argv[])
                                        ? list_keyLeft(&menu_list, false)
                                        : list_keyRight(&menu_list, false);
                     if (changed) {
+                        if (menu_list.active_pos == MENU_MODE)
+                            refreshTimerMenu(&menu_list, active_timer_mode);
                         if (menu_list.active_pos == MENU_AUTORESUME)
                             writeAutoResume(
                                 menu_list.items[MENU_AUTORESUME].value);
@@ -1447,10 +1563,15 @@ int main(int argc, char *argv[])
                         exit_code = 5;
                         quit = true;
                     }
-                    else if (menu_list.active_pos == MENU_NOTIMER) {
-                        writeResult("MENU", "NOTIMER", NULL);
-                        exit_code = 5;
-                        quit = true;
+                    else if (menu_list.active_pos == MENU_MODE || menu_list.active_pos == MENU_DURATION) {
+                        char value[16];
+                        int mode = menu_list.items[MENU_MODE].value;
+                        snprintf(value, sizeof(value), "%d", menu_list.items[MENU_DURATION].value * TIMER_STEP);
+                        writeResult("MENU", mode == 2 ? "DAILY" : mode == 1 ? "SESSION" : "NOTIMER", value);
+                        exit_code = 5; quit = true;
+                    }
+                    else if (menu_list.active_pos == MENU_DATE) {
+                        writeResult("MENU", "CONFIRMDATE", NULL); exit_code = 5; quit = true;
                     }
                     else if (menu_list.active_pos == MENU_AUTORESUME ||
                              menu_list.active_pos == MENU_BRIGHTNESS) {
