@@ -13,10 +13,20 @@
 flagfile=/mnt/SDCARD/.kidmode
 looper=/mnt/SDCARD/App/KidsMode/kid_mode_loop.sh
 
+# A transaction can outlive the armed flag at its final disarm boundary.
+# Never hand a half-swapped profile to MainUI.
+while [ -f /mnt/SDCARD/Saves/kidmode/profile.txn ]; do
+    sh "$looper" recover && break
+    infoPanel -t "Kids Mode" -m "Save recovery needs attention.\nPower off and keep the SD card intact." --auto
+    sleep 5
+done
 [ -f "$flagfile" ] || exit 0
 
 if [ -f "$looper" ]; then
-    sh "$looper" run
+    while [ -f "$flagfile" ]; do
+        sh "$looper" run
+        [ -f "$flagfile" ] && sleep 5
+    done
 else
     # App folder missing — fail open so the device stays usable
     rm -f "$flagfile"

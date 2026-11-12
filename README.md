@@ -155,6 +155,12 @@ computer by making or deleting a folder, and an app update can't lose them.
   computer. **Removing one:** delete the folder — that deletes their saves
   too, so copy it somewhere first if you might want it back.
 
+Interrupted profile moves are recorded in `Saves/kidmode/profile.txn` before
+folders are reused. Recovery resumes the recorded move, commits the incoming
+owner only after the layout is complete, and refuses conflicting destinations
+without deleting saves. Keep the whole `Saves` directory and the journal together
+when recovering an interrupted handoff; do not guess an owner or merge folders.
+
 ## Settings
 
 Optional keys in `App/KidsMode/kidmode.json` (edit from a computer; the

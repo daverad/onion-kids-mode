@@ -30,9 +30,12 @@ export logfile="$work/kidmode.log"
 export flagfile="$work/.kidmode"
 export configfile="$work/kidmode.json"
 export kidmode_test=1
+export KIDMODE_APP_DIR="$testdir/../App/KidsMode"
 
 # shellcheck source=../App/KidsMode/kid_mode_loop.sh
 . "$loopsh"
+# Fixture checks exercise rename ordering; actual flush calls stay in production.
+sync() { :; }
 
 tests_run=0
 tests_failed=0
@@ -51,6 +54,7 @@ fail() {
 # Reset to a card with a parent profile holding save data and the shared
 # folders that must never move (config/theme/lists).
 fixture_reset() {
+    unset selected_kid
     rm -rf "$work"
     mkdir -p "$saves_dir/CurrentProfile"
     rm -f "$flagfile"
@@ -324,6 +328,10 @@ test_unreadable_pointer_parks_rather_than_guesses() {
     seed_kid_profile "${kids_profile_prefix}Ada" "ada"
     mkdir -p "${kids_profile_prefix}Bea" "$backupdir"
     printf '%s\n' "../../../etc" > "$active_kid_file"
+    for _d in $isolated_subdirs; do
+        mv "$current_profile/$_d" "$backupdir/profile-parked-$_d"
+        mkdir -p "$current_profile/$_d"
+    done
     play_as mystery
 
     step restore_profile_isolation
@@ -442,8 +450,10 @@ test_single_child_skips_the_picker() {
     mkdir -p "${kids_profile_prefix}Ada"
     pick_session_kid
     assert_equals "$?" "0" "one child needs no picker"
-    assert_equals "$(get_active_kid)" "Ada" "the only child is the active one"
-    assert_equals "$(active_kids_profile)" "${kids_profile_prefix}Ada" "Ada's profile is in use"
+    assert_equals "$selected_kid" "Ada" "the only child is selected"
+    assert_absent "$active_kid_file"
+    step apply_profile_isolation
+    assert_equals "$(get_active_kid)" "Ada" "owner commits with folders"
 }
 
 # ---------------------------------- main -----------------------------------

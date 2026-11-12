@@ -22,7 +22,7 @@
 
 sysdir=/mnt/SDCARD/.tmp_update
 miyoodir=/mnt/SDCARD/miyoo
-appdir=/mnt/SDCARD/App/KidsMode
+appdir="${KIDMODE_APP_DIR:-/mnt/SDCARD/App/KidsMode}"
 
 kidui_bin="$appdir/bin/kidui"
 configfile="${configfile:-$appdir/kidmode.json}"
@@ -629,7 +629,9 @@ unused_kid_name() {
 
 set_active_kid() {
     mkdir -p "$backupdir"
-    printf '%s\n' "$1" > "$active_kid_file"
+    printf '%s\n' "$1" > "$active_kid_file.new" || return 1
+    sync
+    mv -f "$active_kid_file.new" "$active_kid_file" || return 1
     sync
 }
 
@@ -700,46 +702,7 @@ restore_target_profile() {
     printf '%s\n' "$kids_profile_prefix$_rt"
 }
 
-apply_profile_isolation() {
-    kids_profile="$(active_kids_profile)"
-    mkdir -p "$kids_profile" "$current_profile" "$backupdir"
-    for d in $isolated_subdirs; do
-        rm -rf "$backupdir/profile-parked-$d"
-        if [ -d "$current_profile/$d" ]; then
-            mv "$current_profile/$d" "$backupdir/profile-parked-$d"
-        fi
-        if [ -d "$kids_profile/$d" ]; then
-            mv "$kids_profile/$d" "$current_profile/$d"
-        else
-            mkdir -p "$current_profile/$d"
-        fi
-    done
-    _api_who="$(get_active_kid)" || _api_who=""
-    if [ -n "$_api_who" ]; then
-        log "Switched to $_api_who's own saves/states/thumbnails for this session."
-    else
-        log "Switched to the kid's own saves/states/thumbnails for this session."
-    fi
-}
-
-# $1 (optional) = the profile to put the saves back into. Only the
-# mid-session hand-over passes it, because by then the session pointer
-# already names the child taking over rather than the one finishing.
-restore_profile_isolation() {
-    kids_profile="${1:-$(restore_target_profile)}"
-    mkdir -p "$kids_profile"
-    for d in $isolated_subdirs; do
-        rm -rf "$kids_profile/$d"
-        if [ -d "$current_profile/$d" ]; then
-            mv "$current_profile/$d" "$kids_profile/$d" # keep kid's progress for next time
-        fi
-        if [ -d "$backupdir/profile-parked-$d" ]; then
-            mv "$backupdir/profile-parked-$d" "$current_profile/$d"
-        fi
-    done
-    sync
-    log "Restored the previous saves/states/thumbnails."
-}
+. "$appdir/profiles.sh"
 
 # --------------------------- the roster ------------------------------------
 
@@ -761,17 +724,14 @@ adopt_legacy_profile() {
     valid_kid_name "$1" || return 1
     _al="$kids_profile_prefix$1"
     [ -e "$_al" ] && return 1
-    if [ -d "$legacy_kids_profile" ]; then
-        mv "$legacy_kids_profile" "$_al" || return 1
-    else
-        mkdir -p "$_al" || return 1
-    fi
-    # A session in progress is being played by this child, whatever they
-    # have just been called: point its disarm at the renamed folder.
+    profile_resume || return 1
+    mkdir -p "$legacy_kids_profile" || return 1
+    pt_mode=rename
     if [ -f "$flagfile" ] && ! get_active_kid > /dev/null 2>&1; then
-        set_active_kid "$1"
+        pt_mode=adopt
     fi
-    sync
+    pt_from=''; pt_to=$1; pt_step=0
+    profile_write_journal && profile_resume || return 1
     log "The existing Kids Mode profile is now '$1'."
 }
 
@@ -1214,6 +1174,7 @@ build_game_cmd() {
 # Miyoo Mini V4, playActivity tracking, and the post-game SAVING splash —
 # so Onion auto-save/resume keeps working unchanged.
 run_game_cmd() {
+    profile_resume || return 1
     [ -f "$sysdir/cmd_to_run.sh" ] || return 1
 
     run_cmd="$(cat "$sysdir/cmd_to_run.sh")"
@@ -1347,11 +1308,12 @@ ensure_fav_shortcut() {
 # both sides — and then arm normally. Runs before the child is chosen, so
 # the pointer it reads is still the interrupted session's.
 recover_interrupted_session() {
+    profile_resume || return 1
     for _ris in $isolated_subdirs; do
         [ -d "$backupdir/profile-parked-$_ris" ] || continue
         log "Found saves parked by a session that never unlocked; putting them back before arming."
         restore_profile_isolation
-        return 0
+        return $?
     done
     return 0
 }
@@ -1389,11 +1351,11 @@ pick_session_kid() {
     _psk_count="$(kid_count)"
     if [ "$_psk_count" -eq 0 ]; then
         # No named children: the unnamed single-child profile, as before
-        set_active_kid ""
+        selected_kid=""
         return 0
     fi
     if [ "$_psk_count" -eq 1 ]; then
-        set_active_kid "$(kid_roster)"
+        selected_kid="$(kid_roster)"
         return 0
     fi
 
@@ -1438,7 +1400,7 @@ EOF
     valid_kid_name "$_psk_picked" || return 1
     kid_exists "$_psk_picked" || return 1
 
-    set_active_kid "$_psk_picked"
+    selected_kid="$_psk_picked"
     log "Playing as $_psk_picked this session."
     return 0
 }
@@ -1536,29 +1498,15 @@ auto_resume_if_set() {
 # half-swapped. Returns 0 if a switch happened, 1 if not.
 
 switch_kid() {
-    _sk_from_profile="$(active_kids_profile)"
-    _sk_from="$(sed -n 1p "$active_kid_file" 2> /dev/null)"
-
-    pick_session_kid || {
-        # Canceled or kidui failed: put the pointer back and change nothing
-        printf '%s\n' "$_sk_from" > "$active_kid_file"
-        return 1
-    }
-
-    if [ "$(active_kids_profile)" = "$_sk_from_profile" ]; then
-        log "Hand-over canceled: same child chosen."
-        return 1
-    fi
-
-    # A fresh face gets a fresh budget — inheriting whatever the last child
-    # had left is a surprise nobody asked for
-    pick_session_timer || log "Hand-over: timer picker failed; keeping the current budget."
-
-    restore_profile_isolation "$_sk_from_profile"
-    apply_profile_isolation
+    profile_resume || return 1
+    _sk_from="$(get_active_kid)" || _sk_from=""
+    pick_session_kid || return 1
+    [ "$selected_kid" != "$_sk_from" ] || return 1
+    # Selection does not change ownership. A crash in this screen leaves the
+    # outgoing child's saves and pointer together.
+    pick_session_timer || return 1
+    profile_begin switch "$_sk_from" "$selected_kid" || return 1
     log "Handed over to $(get_active_kid)."
-    # The kid taking over is starting a session, so the setting that skips
-    # the carousel is theirs to inherit too
     auto_resume_if_set
     return 0
 }
@@ -1780,11 +1728,10 @@ EOF
 # ------------------------------ unlock -------------------------------------
 
 disarm() {
-    rm -f "$flagfile"
+    restore_profile_isolation || return 1
     stop_ticker
     restore_ra_lock
     restore_blf_lock
-    restore_profile_isolation
     restore_keymap_override
     ensure_fav_shortcut
     rm -f "$sysdir/cmd_to_run.sh" "$uiresult"
@@ -1799,6 +1746,7 @@ disarm() {
 # ------------------------------ main loop ----------------------------------
 
 cmd_run() {
+    profile_resume || return 1
     if [ ! -f "$kidui_bin" ]; then
         log "kidui binary missing; disarming."
         rm -f "$flagfile"
@@ -1968,10 +1916,10 @@ cmd_run() {
     done
 
     # Flag removed externally (e.g. deleted from a computer) — clean up
+    restore_profile_isolation || return 1
     stop_ticker
     restore_ra_lock
     restore_blf_lock
-    restore_profile_isolation
     restore_keymap_override
     rm -f "$sysdir/cmd_to_run.sh"
     bootScreen clear 2> /dev/null
@@ -2001,7 +1949,7 @@ cmd_arm() {
         return 1
     fi
 
-    recover_interrupted_session
+    recover_interrupted_session || return 1
 
     pick_session_kid
     case $? in
@@ -2028,7 +1976,7 @@ cmd_arm() {
     log "Arming: applying locks and swapping the kid's profile..."
     apply_ra_lock
     apply_blf_lock
-    apply_profile_isolation
+    apply_profile_isolation || return 1
     apply_keymap_override
     ensure_fav_shortcut
     apply_brightness
@@ -2045,6 +1993,9 @@ cmd_arm() {
 [ "$kidmode_test" = "1" ] && return 0
 
 case "${1:-run}" in
+    recover)
+        profile_resume
+        ;;
     arm)
         cmd_arm
         ;;
